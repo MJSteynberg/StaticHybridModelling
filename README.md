@@ -88,3 +88,24 @@ This repository hosts a series of experiments on hybrid modelling of a Helmholtz
     - Supervised data loss (difference between the synthetic model prediction and the true solution).
   - If the computed PDE loss exceeds a threshold (set to 1e-1), the physics parameters are not updated.
 - **Output:** Saves PINN loss and parameter state histories in the appropriate src/files/experiment folder.
+
+## Experiment Results
+
+### Baseline:
+
+![Experiment Baseline Animation](src/results/experiment_baseline/experiment_baseline.gif)
+
+![Experiment Baseline Final Result](src/results/experiment_baseline/experiment_baseline.png)
+
+### Experiment 1:
+
+![Experiment 1 Animation](src/results/experiment_1/experiment_1.gif)
+
+![Experiment 1 Final Result](src/results/experiment_1/experiment_1.png)
+
+### Experiment 2:
+
+![Experiment 2 Animation](src/results/experiment_2/experiment_2.gif)
+
+![Experiment 2 Final Result](src/results/experiment_2/experiment_2.png)
+
