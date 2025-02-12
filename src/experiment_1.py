@@ -270,11 +270,141 @@ def phys_training():
 
     return state_phys, loss_history_phys, state_history
 
+#------------------------------------------------------------------------------
+# PINN Training Function
+# Language: Python
+def pinn_training():
+    """
+    Trains a PINN on the experiment_1 setup.
+    """
+    model_syn = ResNetSynthetic(
+    num_blocks=3,
+    features=100,
+    activation=jax.nn.tanh,
+    output_dim=1
+    )
+    rng = jax.random.PRNGKey(42)
+    var_model_syn = model_syn.init(rng, pts_train[:, 0], pts_train[:, 1])
+    # Initialize physical and synthetic states similar to the PINN version.
+    state_phys = TrainStatePhy.create(
+        apply_fn=lambda params, x, y: None,  # placeholder; adjust as needed
+        params=init_params,
+        tx=optax.adamw(1e-2),
+        extra_state=var_model_phy
+    )
+    state_syn = TrainStateSyn.create(
+        apply_fn=model_syn.apply,
+        params=var_model_syn,
+        tx=optax.adam(1e-3)
+    )
+
+    # Weight for the supervised data loss term.
+    lambda_data = 100.0
+    # PDE residual threshold: if loss_pde is greater than this, freeze physical parameter updates.
+    pde_threshold = 1.0e-1
+
+    def loss_components(params_phys, params_syn):
+        # Generate collocation points from the domain (uniform grid over [-3.0, 3.0])
+        n_coll = 20  # Adjust resolution as desired.
+        x_coll = jnp.linspace(domain[0], domain[1], n_coll, endpoint=True)
+        y_coll = jnp.linspace(domain[0], domain[1], n_coll, endpoint=True)
+        xx_coll, yy_coll = jnp.meshgrid(x_coll, y_coll)
+        pts_coll = jnp.stack([xx_coll.flatten(), yy_coll.flatten()], axis=-1)
+        
+        # Define a single-sample prediction function.
+        def u_single(point):
+            x_val, y_val = point[0], point[1]
+            u_out = model_syn.apply(params_syn, jnp.array([x_val]), jnp.array([y_val]))
+            return u_out.flatten()[0]
+
+        # PDE residual at a single collocation point.
+        def residual_single(point):
+            # Enforce zero residual on Dirichlet boundaries.
+            boundary = (jnp.isclose(point[0], domain[0]) |
+                        jnp.isclose(point[0], domain[1]) |
+                        jnp.isclose(point[1], domain[0]) |
+                        jnp.isclose(point[1], domain[1]))
+
+            def compute_res(_):
+                u_val = u_single(point)
+                grad_u = jax.grad(u_single)(point)  # (du/dx, du/dy)
+
+                # Evaluate Gaussian coefficients.
+                kappa_val = gaussian_kappa(params_phys, point[0], point[1])
+                eta_val = gaussian_eta(params_phys, point[0], point[1])
+
+                # Compute divergence of (kappa * grad u).
+                def term_x(x_val):
+                    grad_u_x = jax.grad(u_single)(jnp.array([x_val, point[1]]))[0]
+                    return gaussian_kappa(params_phys, x_val, point[1]) * grad_u_x
+                dterm_x = jax.grad(term_x)(point[0])
+
+                def term_y(y_val):
+                    grad_u_y = jax.grad(u_single)(jnp.array([point[0], y_val]))[1]
+                    return gaussian_kappa(params_phys, point[0], y_val) * grad_u_y
+                dterm_y = jax.grad(term_y)(point[1])
+                divergence = dterm_x + dterm_y
+
+                # PDE residual: -divergence + eta*u - forcing_func
+                return -divergence + eta_val * u_val - forcing_func(point[0], point[1])
+
+            return jax.lax.cond(boundary, lambda _: 0.0, compute_res, operand=None)
+
+        # Evaluate the PDE loss over all collocation points.
+        res_vals = jax.vmap(residual_single)(pts_coll)
+        loss_pde = jnp.mean(res_vals**2)
+
+        # ----- Supervised Data Loss -----
+        pred_data = model_syn.apply(params_syn, pts_train[:, 0], pts_train[:, 1])
+        loss_data = jnp.mean((pred_data.flatten() - u_train.flatten())**2)
+
+        return loss_pde, loss_data
+
+    def loss_fn_pinn(params_phys, params_syn):
+        loss_pde, loss_data = loss_components(params_phys, params_syn)
+        total_loss = loss_pde + lambda_data * loss_data
+        return total_loss
+
+    @jax.jit
+    def train_step_pinn(state_phys, state_syn):
+        # Compute total loss and its gradients.
+        loss_val, grads = jax.value_and_grad(loss_fn_pinn, argnums=(0, 1))(
+            state_phys.params, state_syn.params)
+        grads_phys, grads_syn = grads
+
+        # Compute current PDE loss without affecting gradients.
+        current_loss_pde = loss_components(state_phys.params, state_syn.params)[0]
+
+        # If the PDE residual is too high, freeze the physics parameter update.
+        def freeze_if_high(loss, grad):
+            return jax.tree.map(lambda g: jnp.where(loss > pde_threshold, 0.0, g), grad)
+
+        grads_phys = freeze_if_high(current_loss_pde, grads_phys)
+
+        state_phys = state_phys.apply_gradients(grads=grads_phys)
+        state_syn  = state_syn.apply_gradients(grads=grads_syn)
+        return state_phys, state_syn, loss_val
+    
+    num_epochs = 3000
+    loss_history = []
+    phys_state_history = []
+    
+    for epoch in range(num_epochs):
+        state_phys, state_syn, loss_val = train_step_pinn(state_phys, state_syn)
+        loss_history.append(jax.device_get(loss_val))
+        phys_state_history.append(state_phys.params)
+        if epoch % 100 == 0:
+            pde_loss = loss_components(state_phys.params, state_syn.params)[0]
+            print(f"[PINN] Epoch {epoch}, Loss: {loss_val:.6f}, PDE Loss: {pde_loss:.6f}, Phys Params: {state_phys.params}")
+    
+    return state_phys, state_syn, loss_history, phys_state_history
+
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     if input("Reproduce data? (y/n): ") == "y":
         state_hyb, hyb_phys_loss_hist, hyb_metrics_hist, hyb_state_hist = hybrid_training()
         state_phys, phys_loss_hist, phy_state_hist = phys_training()
+        state_phys_pinn, state_syn_pinn, pinn_loss_hist, pinn_state_hist = pinn_training()
         # Save all in files
         jnp.save("src/files/experiment_1/helmholtz_hybrid_loss.npy", hyb_phys_loss_hist)
         jnp.save("src/files/experiment_1/helmholtz_hybrid_metrics.npy", hyb_metrics_hist)
@@ -282,6 +412,10 @@ if __name__ == "__main__":
 
         jnp.save("src/files/experiment_1/helmholtz_phys_loss.npy", phys_loss_hist)
         jnp.save("src/files/experiment_1/helmholtz_phys_state_hist.npy", phy_state_hist)
+
+        jnp.save("src/files/experiment_1/helmholtz_pinn_loss.npy", pinn_loss_hist)
+        jnp.save("src/files/experiment_1/helmholtz_pinn_state_hist.npy", pinn_state_hist)
+        
 
     else:
         hyb_phys_loss_hist = jnp.load("src/files/experiment_1/helmholtz_hybrid_loss.npy", allow_pickle=True)
@@ -291,30 +425,37 @@ if __name__ == "__main__":
         phys_loss_hist = jnp.load("src/files/experiment_1/helmholtz_phys_loss.npy", allow_pickle=True)
         phy_state_hist = jnp.load("src/files/experiment_1/helmholtz_phys_state_hist.npy", allow_pickle=True)
 
+        pinn_loss_hist = jnp.load("src/files/experiment_1/helmholtz_pinn_loss.npy", allow_pickle=True)
+        pinn_state_hist = jnp.load("src/files/experiment_1/helmholtz_pinn_state_hist.npy", allow_pickle=True)
+
     plot(
-        phy_state_hist,
-        hyb_state_hist,
-        true_params,
-        phys_loss_hist,
-        hyb_phys_loss_hist,
-        gaussian_kappa,
-        gaussian_eta,
-        pts_train,
-        domain=(-3.0, 3.0),
-        N=100,
-        filename="experiment_1/helmholtz.png"
+    phy_state_hist,
+    hyb_state_hist,
+    pinn_state_hist,      # New argument for PINN training results.
+    true_params,
+    phys_loss_hist,
+    hyb_phys_loss_hist,
+    pinn_loss_hist,          # New loss history for PINN.
+    gaussian_kappa,
+    gaussian_eta,
+    pts_train,
+    domain=(-3.0, 3.0),
+    N=100,
+    filename="experiment_1/experiment_1"
     )
+
     animate(
-        phy_state_hist,
-        hyb_state_hist,
-        true_params,
-        phys_loss_hist,
-        hyb_phys_loss_hist,
-        gaussian_kappa,
-        gaussian_eta,
-        pts_train,
-        domain=(-3.0, 3.0),
-        N=100,
-        filename="experiment_1/helmholtz.gif"
+    phy_state_hist,
+    hyb_state_hist,
+    pinn_state_hist,      # New argument for PINN training results.
+    true_params,
+    phys_loss_hist,
+    hyb_phys_loss_hist,
+    pinn_loss_hist,          # New loss history for PINN.
+    gaussian_kappa,
+    gaussian_eta,
+    pts_train,
+    domain=(-3.0, 3.0),
+    N=100,
+    filename="experiment_1/experiment_1"
     )
-    
