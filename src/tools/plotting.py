@@ -287,7 +287,7 @@ def animate(
                 loss_line_phy, loss_line_pinn, loss_line_hyb]
 
     anim = animation.FuncAnimation(
-        fig, update, frames=range(0, epochs, 5), interval=100, blit=False
+        fig, update, frames=range(0, epochs, 12), interval=100, blit=False
     )
     anim.save(filename, dpi=120)
     plt.close(fig)

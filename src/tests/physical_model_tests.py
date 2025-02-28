@@ -4,6 +4,7 @@ from timeit import timeit
 
 import jax
 import jax.numpy as jnp
+from flax import nnx
 
 # Ensure that the project root is on sys.path.
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -11,7 +12,7 @@ project_root = os.path.abspath(os.path.join(current_dir, ".."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from models.physical_model import PoissonModel
+from models.physical_model import PhysicalModel
 
 pi = 3.141592653589793
 
@@ -46,22 +47,36 @@ def eval_points(n=200, domain=(0.0, 1.0)):
     points = jnp.stack([x_grid.flatten(), y_grid.flatten()], axis=-1)
     return points
 
+# Default coefficient functions that match the original behavior
+def default_kappa(parameters, x, y):
+    return 1.0
+
+def default_eta(parameters, x, y):
+    return 0.0
+
 def test_poisson_model_defaults():
     # Test with default kappa and eta (kappa=1.0, eta=0.0)
     domain = (0.0, 1.0)
     N = 30  # Mesh resolution
     parameters = jnp.array([1.0, 1.0])
     
-    # Instantiate the model (using default coefficients).
-    model = PoissonModel(parameters=parameters, domain=domain, N=N, forcing_func=forcing_func)
+    # Instantiate the model with PhysicalModel
+    model = PhysicalModel(
+        domain=domain, 
+        N=N, 
+        parameters=parameters, 
+        training=False, 
+        forcing_func=forcing_func,
+        kappa_func=default_kappa,
+        eta_func=default_eta,
+        rngs=nnx.Rngs(0)
+    )
     
     # Create evaluation grid of 200x200 points.
     points = eval_points(n=200, domain=domain)
     
-    # Bind and apply the module.
-    rng = jax.random.PRNGKey(0)
-    variables = model.init(rng, points[:, 0], points[:, 1], mutable=["cache", "state"])
-    u_computed, variables = model.apply(variables, points[:, 0], points[:, 1], mutable=["cache", "state"])
+    # Call the model to compute the solution at each point using vmap
+    u_computed = jax.vmap(model)(points[:, 0], points[:, 1])
     print("Default Coefficients:")
     print(f"Computed solution shape: {u_computed.shape}")
     
@@ -69,18 +84,8 @@ def test_poisson_model_defaults():
     u_expected = jnp.array([u_exact(x, y) for x, y in points])
     error = jnp.abs(u_computed.flatten() - u_expected)
     mse_error = jnp.mean(error ** 2)
-    print(f"Max error: {mse_error:.4f}")
-    assert mse_error < 1e-2, f"Maximum error too large: {mse_error}"
-
-def gaussian_kappa(parameters, x, y):
-    # parameters: [amplitude, center_x, center_y, sigma]
-    amplitude, cx, cy, sigma = parameters
-    return amplitude * jnp.exp(-(((x - cx) ** 2) + ((y - cy) ** 2)) / (2 * sigma ** 2))
-
-def gaussian_eta(parameters, x, y):
-    # parameters: [amplitude, center_x, center_y, sigma]
-    amplitude, cx, cy, sigma = parameters
-    return amplitude * jnp.exp(-(((x - cx) ** 2) + ((y - cy) ** 2)) / (2 * sigma ** 2))
+    print(f"MSE error: {mse_error:.4f}")
+    assert mse_error < 1e-2, f"MSE error too large: {mse_error}"
 
 def test_poisson_model_known_coeff():
     # Test with constant, non-unity coefficients and a forcing function
@@ -90,24 +95,23 @@ def test_poisson_model_known_coeff():
     # Parameters are not used by our constant coefficients, but provided for compatibility.
     parameters = jnp.array([0.0])
     
-    # Forcing function ensuring u_exact is the solution.
-    # With u_exact = sin(pi*x)*sin(pi*y), Δ u_exact = -2π² sin(pi*x) sin(pi*y)
-    # so -div(kappa grad u) = -2 Δ u_exact = 4π² sin(pi*x)*sin(pi*y)
-    model = PoissonModel(
-        parameters=parameters,
+    # Instantiate the model with PhysicalModel
+    model = PhysicalModel(
         domain=domain,
         N=N,
+        parameters=parameters,
+        training=False,
         forcing_func=forcing_known,
         kappa_func=constant_kappa,
-        eta_func=constant_eta,  # Provided but not used in assembly.
+        eta_func=constant_eta,
+        rngs=nnx.Rngs(0)
     )
     
     # Create evaluation grid of 200x200 points.
     points = eval_points(n=200, domain=domain)
     
-    rng = jax.random.PRNGKey(0)
-    variables = model.init(rng, points[:, 0], points[:, 1], mutable=["cache", "state"])
-    u_computed, variables = model.apply(variables, points[:, 0], points[:, 1], mutable=["cache", "state"])
+    # Call the model to compute the solution at each point using vmap
+    u_computed = jax.vmap(model)(points[:, 0], points[:, 1])
     print("\nKnown Coefficients Test:")
     print(f"Computed solution shape: {u_computed.shape}")
     
@@ -115,8 +119,8 @@ def test_poisson_model_known_coeff():
     u_expected = jnp.array([u_exact(x, y) for x, y in points])
     error = jnp.abs(u_computed.flatten() - u_expected)
     mse_error = jnp.mean(error**2)
-    print(f"Max error: {mse_error:.4f}")
-    assert mse_error < 1e-2, f"Maximum error too large: {mse_error}"
+    print(f"MSE error: {mse_error:.4f}")
+    assert mse_error < 1e-2, f"MSE error too large: {mse_error}"
 
 def nonconstant_kappa(parameters, x, y):
     # Nonconstant kappa: 1 + x*y
@@ -142,22 +146,23 @@ def test_poisson_model_nonconstant():
     # parameters are not used here but provided for compatibility.
     parameters = jnp.array([0.0])
     
-    # Instantiate the model with nonconstant coefficient functions.
-    model = PoissonModel(
-        parameters=parameters,
+    # Instantiate the model with PhysicalModel
+    model = PhysicalModel(
         domain=domain,
         N=N,
+        parameters=parameters,
+        training=False,
         forcing_func=forcing_nonc,
         kappa_func=nonconstant_kappa,
-        eta_func=nonconstant_eta,  # Provided but not used in assembly.
+        eta_func=nonconstant_eta,
+        rngs=nnx.Rngs(0)
     )
     
     # Create evaluation grid of 200x200 points.
     points = eval_points(n=200, domain=domain)
     
-    rng = jax.random.PRNGKey(0)
-    variables = model.init(rng, points[:, 0], points[:, 1], mutable=["cache", "state"])
-    u_computed, variables = model.apply(variables, points[:, 0], points[:, 1], mutable=["cache", "state"])
+    # Call the model to compute the solution at each point using vmap
+    u_computed = jax.vmap(model)(points[:, 0], points[:, 1])
     print("\nNonconstant Coefficients Test:")
     print(f"Computed solution shape: {u_computed.shape}")
     
@@ -165,51 +170,11 @@ def test_poisson_model_nonconstant():
     u_expected = jnp.array([u_exact(x, y) for x, y in points])
     error = jnp.abs(u_computed.flatten() - u_expected)
     mse_error = jnp.mean(error**2)
-    print(f"Max error: {mse_error:.4f}")
-    assert mse_error < 1e-2, f"Maximum error too large: {mse_error}"
-
-
-def performance_testing():
-    domain = (0.0, 1.0)
-    N = 100  # Mesh resolution for FEM assembly
-    parameters = jnp.array([1.0])
-    
-    # Alternative forcing function for performance testing.
-    def forcing_perf(x, y):
-        return jnp.sin(pi * x) * jnp.cos(pi * y)
-    
-    # Instantiate the model.
-    model = PoissonModel(parameters=parameters, domain=domain, N=N, forcing_func=forcing_perf)
-    
-    # Create a large evaluation grid (1000 x 1000 points)
-    x_eval = jnp.linspace(domain[0], domain[1], 1000)
-    y_eval = jnp.linspace(domain[0], domain[1], 1000)
-    x_grid, y_grid = jnp.meshgrid(x_eval, y_eval)
-    x_eval_flat = x_grid.flatten()
-    y_eval_flat = y_grid.flatten()
-    
-    # Initialize the model.
-    rng = jax.random.PRNGKey(0)
-    variables = model.init(rng, x_eval_flat, y_eval_flat, mutable=["cache", "state"])
-    
-    num_executions = 100
-    
-    # Extract the FEM cache for direct PDE solving.
-    fem = variables["cache"]["fem"]
-    
-    # Time the PDE solve.
-    solve_time = timeit(lambda: model._solve_pde(fem), number=num_executions)
-    
-    # Time the complete evaluation (__call__) of the solution.
-    eval_time = timeit(lambda: model.apply(variables, x_eval_flat, y_eval_flat, mutable=["cache", "state"]), number=num_executions)
-    
-    print("Performance Testing:")
-    print(f"Average PDE solve time (with JIT): {solve_time / num_executions:.4f} seconds")
-    print(f"Average evaluation (__call__) time (with caching): {eval_time / num_executions:.4f} seconds")
+    print(f"MSE error: {mse_error:.4f}")
+    assert mse_error < 1e-2, f"MSE error too large: {mse_error}"
 
 if __name__ == "__main__":
     test_poisson_model_defaults()
     test_poisson_model_known_coeff()
     test_poisson_model_nonconstant()
-    performance_testing()
     print("All tests passed!")

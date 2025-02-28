@@ -1,5 +1,12 @@
 import os
 import sys
+import jax
+import jax.numpy as jnp
+import optax
+import matplotlib.pyplot as plt
+from functools import partial
+from flax import nnx
+import optimistix
 
 # Set working directory to the src folder.
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -8,437 +15,387 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 os.chdir(src_dir)
 
-import jax
-import jax.numpy as jnp
-import matplotlib.pyplot as plt
-
-import optax
-from flax.training import train_state
-
-from models.physical_model import HelmholtzModel
-from models.synthetic_model import ResNetSynthetic
-
-from tools.training import *  # Assumes loss_fn is defined in tools.training
-from tools.plotting import *   # Assumes plot is defined in tools.plotting
-
-import time
-import jax.profiler
+from models.physical_model import PhysicalModel  
+from models.synthetic_model import FeedForwardNet, ResNetSynthetic
+from models.other_models import PINN
+from tools.plotting import *  
 
 pi = jnp.pi
 
-# -----------------------------------------------------------------------------
 # Define coefficient functions as Gaussians.
-def gaussian_kappa(parameters, x, y):
+def kappa(parameters, x, y): 
     amplitude, cx, cy = parameters[0:3]
-    return amplitude * jnp.exp(-(((x - cx)**2 + (y - cy)**2) / 1)) + 1
+    return amplitude * jnp.exp(-(((x - cx)**2 + (y - cy)**2))) + 1
 
-def gaussian_eta(parameters, x, y):
+def eta(parameters, x, y):
     amplitude, cx, cy = parameters[3:6]
-    return (amplitude * jnp.exp(-(((x - cx)**2 + (y - cy)**2) / 1)) + 1)**2
+    return (amplitude * jnp.exp(-(((x - cx)**2 + (y - cy)**2))) + 1)**2
 
-# -----------------------------------------------------------------------------
-def forcing_func(x, y):
-    return 4 * (jnp.exp(-((x - 2.0)**2 + (y-2)**2)) - jnp.exp(-((x + 1.0)**2 + (y + 1.0)**2)))
-
-# -----------------------------------------------------------------------------
-# Generate the "true solution" using a high resolution model.
+def f_full(parameters, x, y, L):
+    A, ax, ay, B, bx, by = parameters
+    return -2*pi*A*(2*ax - 2*x)*jnp.exp(-(-ax + x)**2 - (-ay + y)**2)*jnp.sin(2*pi*y/L)*jnp.cos(2*pi*x/L)/L - 2*pi*A*(2*ay - 2*y)*jnp.exp(-(-ax + x)**2 - (-ay + y)**2)*jnp.sin(2*pi*x/L)*jnp.cos(2*pi*y/L)/L + (B*jnp.exp(-(-bx + x)**2 - (-by + y)**2) + 1)**2*jnp.sin(2*pi*x/L)*jnp.sin(2*pi*y/L) + 8*pi**2*(A*jnp.exp(-(-ax + x)**2 - (-ay + y)**2) + 1)*jnp.sin(2*pi*x/L)*jnp.sin(2*pi*y/L)/L**2
+def u_true(x, y, L):
+    return jnp.sin(2*pi*x/L)*jnp.sin(2*pi*y/L)
+# -----------------------------------------------------------------------------  
+# Generate the “true solution” using a high resolution physical model.
 true_params = jnp.array([
     3.5, -1.0, -1.0,   # kappa parameters
-    1.5, 2.0, 1.0   # eta parameters
+    1.5, 2.0, 1.0       # eta parameters
 ])
-domain = (-3.0, 3.0)
-true_N = 100
-true_model = HelmholtzModel(
-    domain=domain,
-    N=true_N,
-    parameters=true_params,
-    training=False,
-    forcing_func=forcing_func,
-    kappa_func=gaussian_kappa,
-    eta_func=gaussian_eta,
-)
-print(f"True model initialized with parameters: {true_params}")
+L = 6
+domain = (-L//2, L//2)
+def f(x, y):
+    return f_full(true_params, x, y, L)
 
-# Sample the true solution on a subdomain.
-n_train = 10
-# Sample x_train and y_train randomly from the domain.
-xx_train = jax.random.uniform(jax.random.PRNGKey(3), shape=(n_train**2,), minval=-2.5, maxval=2.5)
-yy_train = jax.random.uniform(jax.random.PRNGKey(4), shape=(n_train**2,), minval=-2.5, maxval=2.5)
 
-pts_train = jnp.stack([xx_train.flatten(), yy_train.flatten()], axis=-1)
-rng = jax.random.PRNGKey(42)
-var_true = true_model.init(rng, pts_train[:, 0], pts_train[:, 1], mutable=["cache", "state"])
-u_train = true_model.apply(var_true, pts_train[:, 0], pts_train[:, 1], mutable=["cache", "state"])[0]
-# dd 30% noise to the true solution.
-u_train += 0.3 * jax.random.normal(rng, u_train.shape) * jnp.max(jnp.abs(u_train))
-print(f"Training subdomain shape: {u_train.shape}")
 
-# -----------------------------------------------------------------------------
-# Create a lower resolution physics model with randomized parameters.
-# create random amplitude, center x, and center y for kappa and eta
-rng1, rng2, rng3 = jax.random.split(jax.random.PRNGKey(54), 3)
-amplitudes = jax.random.uniform(rng1, shape=(2,), minval=2, maxval=3)
-centers_x = jax.random.uniform(rng2, shape=(2,), minval=-1.5, maxval=1.5)
-centers_y = jax.random.uniform(rng3, shape=(2,), minval=-1.5, maxval=1.5)
+subdomain=[(-3.0, 3.0), (-3.0, 3.0)]
+n_train=100
+rng_x, rng_y = jax.random.split(jax.random.PRNGKey(0))
+xx_train = jax.random.uniform(rng_x, shape=(n_train,), minval=subdomain[0][0], maxval=subdomain[0][1])
+yy_train = jax.random.uniform(rng_y, shape=(n_train,), minval=subdomain[1][0], maxval=subdomain[1][1])
+pts_train = jnp.stack([xx_train, yy_train], axis=-1)
+# Use vmap over the new scalar __call__ for prediction.
+u_train = u_true(xx_train, yy_train, L).reshape(-1, 1)
+u_train += jax.random.normal(jax.random.PRNGKey(0), shape=u_train.shape) * 0.1 * jnp.std(u_train)
+print(f"Training data generated with shape: {u_train.shape}")
 
-init_params = jnp.array([amplitudes[0], centers_x[0], centers_y[0], amplitudes[1], centers_x[1], centers_y[1]])
-print(f"Initial parameters: {init_params}")
-low_res_N = 20
-model_phy = HelmholtzModel(
-    domain=domain,
-    N=low_res_N,
-    parameters=init_params,
-    training=True,
-    forcing_func=forcing_func,
-    kappa_func=gaussian_kappa,
-    eta_func=gaussian_eta,
-)
-var_model_phy = model_phy.init(rng, pts_train[:, 0], pts_train[:, 1], mutable=["cache", "state"])
+def train_hybrid(epochs):
+    # -------------------------------------------------------------------------
+    # Initialize the synthetic model.
+    synthetic_model = ResNetSynthetic(
+        hidden_dims=(256,256), 
+        activation=nnx.relu, 
+        output_dim=1, 
+        rngs=nnx.Rngs(0)
+    )
 
-# -----------------------------------------------------------------------------
-# Create a synthetic model.
-model_syn = ResNetSynthetic(
-    num_blocks=3,
-    features=100,
-    activation=jax.nn.relu,
-    output_dim=1
-)
-rng = jax.random.PRNGKey(42)
-var_model_syn = model_syn.init(rng, pts_train[:, 0], pts_train[:, 1])
-
-# -----------------------------------------------------------------------------
-# JIT compile prediction for speed.
-@jax.jit
-def predict(state, x, y):
-    model_trained = HelmholtzModel(
+    # -------------------------------------------------------------------------
+    # Setup physical model.
+    low_res_N = 20
+    rng1, rng2, rng3 = jax.random.split(jax.random.PRNGKey(0), 3)
+    amplitudes = jax.random.uniform(rng1, shape=(2,), minval=1, maxval=3)
+    centers_x = jax.random.uniform(rng2, shape=(2,), minval=-1, maxval=1)
+    centers_y = jax.random.uniform(rng3, shape=(2,), minval=-1, maxval=1)
+    init_params = nnx.Param(jnp.array([
+        amplitudes[0], centers_x[0], centers_y[0],
+        amplitudes[1], centers_x[1], centers_y[1]
+    ]))
+    physical_model = PhysicalModel(
         domain=domain,
         N=low_res_N,
-        parameters=state.params,
-        training=False,
-        forcing_func=forcing_func,
-        kappa_func=gaussian_kappa,
-        eta_func=gaussian_eta,
+        parameters=init_params,
+        training=True,
+        forcing_func=f,
+        kappa_func=kappa,
+        eta_func=eta,
+        rngs=nnx.Rngs(0)
     )
-    u_pred, _ = model_trained.apply(state.extra_state, x, y, mutable=["cache", "state"])
-    return u_pred
+    nnx.display(physical_model)
+    # -------------------------------------------------------------------------
+    # Initialize the optimizers.
+    syn_opt = nnx.Optimizer(synthetic_model, optax.adam(1e-3))
+    phys_opt = nnx.Optimizer(physical_model, optax.adam(5e-3))
 
-# -----------------------------------------------------------------------------
-# Hybrid Training Function
-def hybrid_training():
-    # Create training states for physics and synthetic models.
-    state_phys = TrainStatePhy.create(
-        apply_fn=model_phy.apply,
-        params=init_params,
-        tx=optax.adamw(5e-2),
-        extra_state=var_model_phy
-    )
-    state_syn = TrainStateSyn.create(
-        apply_fn=model_syn.apply,
-        params=var_model_syn,
-        tx=optax.adam(1e-3)
-    )
+    # Helper to vmap a scalar-call model.
+    def vmapped_model(m, xs, ys):
+        return jax.vmap(lambda xx, yy: m(xx, yy))(xs, ys)
 
-    # Loss function now returns scalar loss and auxiliary info as tuple.
-    def loss_fn_and_metrics(params_phys, params_syn, extra_state, x, y, u_target, flag):
-        model_updated = HelmholtzModel(
-            domain=domain,
-            N=low_res_N,
-            parameters=params_phys,
-            training=True,
-            forcing_func=forcing_func,
-            kappa_func=gaussian_kappa,
-            eta_func=gaussian_eta,
-        )
-        rng_local = jax.random.PRNGKey(0)
-        loss_phys, loss_syn, loss_hyb, new_state = loss_fn(
-            model_updated, model_syn,
-            params_phys, params_syn, extra_state,
-            x, y, u_target, rng_local
-        )
-        if flag == "phys":
-            # Return pure physics loss as scalar.
-            loss_val = 1e2 * loss_phys + loss_hyb
-            metrics = {"phys_loss": loss_phys, "hyb_loss": loss_hyb}
-        else:
-            loss_val = 1e2 * loss_syn + loss_hyb
-            metrics = {"syn_loss": loss_syn, "hyb_loss": loss_hyb}
-        # Return scalar loss and auxiliary tuple.
-        return loss_val, (new_state, metrics)
+    @nnx.jit
+    def train_step_hyb(model, model_other, optimizer, x, y, u, x_collocation, y_collocation):
+        def loss_data(m):
+            u_pred = vmapped_model(m, x, y)
+            return jnp.mean(optax.squared_error(u_pred, u))
+        
+        def loss_hyb(m):
+            u_pred = vmapped_model(m, x_collocation, y_collocation)
+            u_pred_other = vmapped_model(model_other, x_collocation, y_collocation)
+            return jnp.mean(optax.squared_error(u_pred, u_pred_other))
+        
+        def loss_fn(m):
+            return  loss_data(m) + loss_hyb(m)
 
-    # JIT compiled physics training step.
-    @jax.jit
-    def train_step_phys(state_phys, state_syn, x, y, u_target):
-        (loss_val, (new_state, metrics)), grads = jax.value_and_grad(
-            lambda p, es: loss_fn_and_metrics(p, state_syn.params, es, x, y, u_target, "phys"),
-            has_aux=True
-        )(state_phys.params, state_phys.extra_state)
-        state_phys = state_phys.apply_gradients(grads=grads, extra_state=new_state)
-        return state_phys, loss_val, metrics
+        dloss = loss_data(model)
+        loss, grads = nnx.value_and_grad(loss_fn)(model)
+        optimizer.update(grads)
 
-    # JIT compiled synthetic training step.
+        return loss, dloss
     
-    @jax.jit
-    def train_step_syn(state_phys, state_syn, x, y, u_target):
-        (loss_val, (new_state, metrics)), grads = jax.value_and_grad(
-            lambda s: loss_fn_and_metrics(state_phys.params, s, state_phys.extra_state, x, y, u_target, "syn"),
-            has_aux=True
-        )(state_syn.params)
-        state_syn = state_syn.apply_gradients(grads=grads)
-        return state_syn, loss_val
+    @nnx.jit
+    def train_step(model, optimizer, x, y, u):
+        def loss_data(m):
+            u_pred = vmapped_model(m, x, y)
+            return jnp.mean(optax.squared_error(u_pred, u))
+        
+        def loss_fn(m):
+            return loss_data(m)
+        
+        loss, grads = nnx.value_and_grad(loss_fn)(model)
+        optimizer.update(grads)
+        return loss
+
+    # -------------------------------------------------------------------------
+    # Train the models.
+    loss_history = []
+    param_history = []
+    rng = jax.random.PRNGKey(42)
+    n_collocation = 20
+    loss_syn_data = 1
+    for epoch in range(epochs):
+        if loss_syn_data > 1e-1:
+            loss_syn_data = train_step(synthetic_model, syn_opt, xx_train, yy_train, u_train)
+            if epoch % 100 == 0:
+                print(f"Epoch {epoch}, Loss (synthetic): {loss_syn_data}")
+
+        else:
+            rng, rng1, rng2 = jax.random.split(rng, 3)
+            x_collocation = jax.random.uniform(rng1, shape=(n_collocation,),
+                                            minval=domain[0], maxval=domain[1])
+            y_collocation = jax.random.uniform(rng2, shape=(n_collocation,),
+                                            minval=domain[0], maxval=domain[1])
+        
+            
+            loss_syn, loss_syn_data = train_step_hyb(synthetic_model, physical_model, syn_opt,
+                                    xx_train, yy_train, u_train,
+                                    x_collocation, y_collocation)
+            
+            loss_phy, loss_phy_data = train_step_hyb(physical_model, synthetic_model, phys_opt,
+                                xx_train, yy_train, u_train,
+                                x_collocation, y_collocation)
+            loss_history.append(loss_phy_data)
+            param_history.append(physical_model.parameters.value)
+            if epoch % 100 == 0:
+                print(f"Epoch {epoch}, Loss (physical): {loss_phy_data}, Loss (synthetic): {loss_syn}, Parameters: {physical_model.parameters.value}")
+
+    return loss_history, param_history
+
+def train_fem(epochs):
+    # -------------------------------------------------------------------------
+    # Setup physical model.
+    low_res_N = 20
+    rng1, rng2, rng3 = jax.random.split(jax.random.PRNGKey(0), 3)
+    amplitudes = jax.random.uniform(rng1, shape=(2,), minval=1, maxval=3)
+    centers_x = jax.random.uniform(rng2, shape=(2,), minval=-1, maxval=1)
+    centers_y = jax.random.uniform(rng3, shape=(2,), minval=-1, maxval=1)
+    init_params = nnx.Param(jnp.array([
+        amplitudes[0], centers_x[0], centers_y[0],
+        amplitudes[1], centers_x[1], centers_y[1]
+    ]))
+    physical_model = PhysicalModel(
+        domain=domain,
+        N=low_res_N,
+        parameters=init_params,
+        training=True,
+        forcing_func=f,
+        kappa_func=kappa,
+        eta_func=eta,
+        rngs=nnx.Rngs(0)
+    )
+    nnx.display(physical_model)
+    # -------------------------------------------------------------------------
+    # Initialize the optimizer.
+    phys_opt = nnx.Optimizer(physical_model, optax.adam(5e-3))
+
+    def vmapped_model(m, xs, ys):
+        return jax.vmap(lambda xx, yy: m(xx, yy))(xs, ys)
+
+    @nnx.jit
+    def train_step(model, optimizer, x, y, u):
+        def loss_data(m):
+            u_pred = vmapped_model(m, x, y)
+            return jnp.mean(optax.squared_error(u_pred, u))
+        
+        def loss_fn(m):
+            return  loss_data(m)
+        
+        loss, grads = nnx.value_and_grad(loss_fn)(model)
+        optimizer.update(grads)  # In-place update.
+        return loss   
+
+    # -------------------------------------------------------------------------
+    # Train the physical model.
+    loss_history = []
+    param_history = []
+    for epoch in range(epochs):
+        loss_phy = train_step(physical_model, phys_opt, xx_train, yy_train, u_train)
+        loss_history.append(loss_phy)
+        param_history.append(physical_model.parameters.value)
+        if epoch % 100 == 0:
+            print(f"Epoch {epoch}, Loss (physical): {loss_phy}, Parameters: {physical_model.parameters.value}")
+
+    return loss_history, param_history
+
+
+def trian_pinn(epochs):
+    # Create the PINN model instance.
+    rng1, rng2, rng3 = jax.random.split(jax.random.PRNGKey(0), 3)
+    amplitudes = jax.random.uniform(rng1, shape=(2,), minval=1, maxval=3)
+    centers_x = jax.random.uniform(rng2, shape=(2,), minval=-1, maxval=1)
+    centers_y = jax.random.uniform(rng3, shape=(2,), minval=-1, maxval=1)
+    init_params = nnx.Param(jnp.array([
+        amplitudes[0], centers_x[0], centers_y[0],
+        amplitudes[1], centers_x[1], centers_y[1]
+    ]))
+    model = ResNetSynthetic(
+        hidden_dims=(256,256), 
+        activation=nnx.tanh, 
+        output_dim=1, 
+        rngs=nnx.Rngs(0)
+    )
+    pinn = PINN(domain=domain, model=model, parameters=init_params, forcing_func=f,
+                kappa_func=kappa, eta_func=eta, rngs=nnx.Rngs(0))
+    
+    tx = optax.multi_transform(
+        {
+        "model": optax.adam(1e-3),
+        "parameters": optax.adam(5e-3),
+        },
+        nnx.State({
+            "model": "model",
+            "parameters": "parameters"
+        })
+    )
+    opt = nnx.Optimizer(pinn, tx)
+    
+    
+
+    # Define vmapped helper functions for the scalar calls.
+    def vmapped_model(m, xs, ys):
+        return jax.vmap(lambda xx, yy: m(xx, yy))(xs, ys)
+    
+    def vmapped_residual(m, xs, ys):
+        return jax.vmap(lambda xx, yy: m.residual(xx, yy))(xs, ys)
+    
+    @nnx.jit
+    def train_step_pinn(model, optimizer,x_i, y_i, x_b, y_b): 
+        def loss_res(m):
+            u_res = vmapped_residual(m, x_i, y_i)
+            u_b = vmapped_model(m, x_b, y_b)
+            return optax.squared_error(u_res).mean() + 1e1*optax.squared_error(u_b).mean()
+        
+        def loss_fn(m):
+            return  loss_res(m)
+        
+        # Compute the residual loss separately.
+        
+        loss, grads = nnx.value_and_grad(loss_fn)(model)
+        
+        # If the residual loss is too high, freeze (zero) the gradients.
+        grads['parameters'] = jax.tree.map(lambda g: 0.0, grads['parameters'])
+        optimizer.update(grads)  # In-place update.
+        return loss
+
+    
+    def train_step(model, optimizer, x, y, u, x_i, y_i, x_b, y_b): 
+        def loss_data(m):
+            u_pred = vmapped_model(m, x, y)
+            return optax.squared_error(u_pred, u).mean()
+        
+        def loss_res(m):
+            u_res = vmapped_residual(m, x_i, y_i)
+            u_b = vmapped_model(m, x_b, y_b)
+            return optax.squared_error(u_res).mean() + 1e1*optax.squared_error(u_b).mean()
+        
+        def loss_fn(m):
+            return  loss_data(m) + loss_res(m)
+
+        dloss = loss_data(model)
+        loss, grads = nnx.value_and_grad(loss_fn)(model)
+
+        optimizer.update(grads)  # In-place update.
+        return loss, dloss
 
     # Training loop.
-    model_phy.train()  # Set to training mode.
-    num_epochs = 3000
-
-    loss_history_phys = []
-    metrics_history = []
-    state_history = []
-
-    for epoch in range(num_epochs):
-        state_phys, loss_val_phys, metrics = train_step_phys(
-            state_phys, state_syn, pts_train[:, 0], pts_train[:, 1], u_train
-        )
-        loss_history_phys.append(jax.device_get(loss_val_phys))
-        metrics_history.append(jax.device_get(metrics))
-        state_history.append(state_phys.params)
-        if epoch % 100 == 0:
-            print(f"[Hybrid] Epoch {epoch}, Loss: {loss_val_phys:.6f}, Params: {state_phys.params}")
-
-        # Synthetic updates for each physics update.
-        for _ in range(3):
-            state_syn, loss_val_syn = train_step_syn(
-                state_phys, state_syn, pts_train[:, 0], pts_train[:, 1], u_train
-            )
-            # Optionally log the synthetic branch loss.
-
-    return state_phys, loss_history_phys, metrics_history, state_history
-
-# -----------------------------------------------------------------------------
-# Physics-only Training Function
-def phys_training():
-    # Create training states for physics and synthetic models.
-    state_phys = TrainStatePhy.create(
-        apply_fn=model_phy.apply,
-        params=init_params,
-        tx=optax.adamw(5e-2),
-        extra_state=var_model_phy
-    )
-    state_syn = TrainStateSyn.create(
-        apply_fn=model_syn.apply,
-        params=var_model_syn,
-        tx=optax.adam(1e-3)
-    )
-
-    # Loss function returning only pure physics loss.
-    def loss(params_phys, params_syn, extra_state, x, y, u_target, flag):
-        model_updated = HelmholtzModel(
-            domain=domain,
-            N=low_res_N,
-            parameters=params_phys,
-            training=True,
-            forcing_func=forcing_func,
-            kappa_func=gaussian_kappa,
-            eta_func=gaussian_eta,
-        )
-        rng_local = jax.random.PRNGKey(0)
-        loss_phys, loss_syn, loss_hyb, new_state = loss_fn(
-            model_updated, model_syn,
-            params_phys, params_syn, extra_state,
-            x, y, u_target, rng_local
-        )
-        return 1e2 * loss_phys, new_state
-
-    # JIT compiled physics training step.
-    @jax.jit
-    def train_step_phys_only(state_phys, state_syn, x, y, u_target):
-        (loss_val, new_state), grads = jax.value_and_grad(loss, has_aux=True)(
-            state_phys.params, state_syn.params, state_phys.extra_state, x, y, u_target, "phys"
-        )
-        state_phys = state_phys.apply_gradients(grads=grads, extra_state=new_state)
-        return state_phys, loss_val
-
-    model_phy.train()  # Set to training mode.
-    num_epochs = 3000
-    loss_history_phys = []
-    state_history = []
-
-    for epoch in range(num_epochs):
-        state_phys, loss_val_phys = train_step_phys_only(
-            state_phys, state_syn, pts_train[:, 0], pts_train[:, 1], u_train
-        )
-        loss_history_phys.append(jax.device_get(loss_val_phys))
-        state_history.append(state_phys.params)
-        if epoch % 100 == 0:
-            print(f"[Physics] Epoch {epoch}, Loss: {loss_val_phys:.6f}, Params: {state_phys.params}")
-
-    return state_phys, loss_history_phys, state_history
-
-def pinn_training():
-    """
-    Trains a PINN on the experiment_2 setup.
-    """
-    model_syn = ResNetSynthetic(
-    num_blocks=3,
-    features=100,
-    activation=jax.nn.tanh,
-    output_dim=1
-    )
-    rng = jax.random.PRNGKey(42)
-    var_model_syn = model_syn.init(rng, pts_train[:, 0], pts_train[:, 1])
-    # Initialize physical and synthetic states similar to the PINN version.
-    state_phys = TrainStatePhy.create(
-        apply_fn=lambda params, x, y: None,  # placeholder; adjust as needed
-        params=init_params,
-        tx=optax.adamw(1e-2),
-        extra_state=var_model_phy
-    )
-    state_syn = TrainStateSyn.create(
-        apply_fn=model_syn.apply,
-        params=var_model_syn,
-        tx=optax.adam(1e-3)
-    )
-
-    # Weight for the supervised data loss term.
-    lambda_data = 100.0
-    # PDE residual threshold: if loss_pde is greater than this, freeze physical parameter updates.
-    pde_threshold = 2.0
-
-    def loss_components(params_phys, params_syn):
-        # Generate collocation points from the domain (uniform grid over [-3.0, 3.0])
-        n_coll = 20  # Adjust resolution as desired.
-        x_coll = jnp.linspace(domain[0], domain[1], n_coll, endpoint=True)
-        y_coll = jnp.linspace(domain[0], domain[1], n_coll, endpoint=True)
-        xx_coll, yy_coll = jnp.meshgrid(x_coll, y_coll)
-        pts_coll = jnp.stack([xx_coll.flatten(), yy_coll.flatten()], axis=-1)
-        
-        # Define a single-sample prediction function.
-        def u_single(point):
-            x_val, y_val = point[0], point[1]
-            u_out = model_syn.apply(params_syn, jnp.array([x_val]), jnp.array([y_val]))
-            return u_out.flatten()[0]
-
-        # PDE residual at a single collocation point.
-        def residual_single(point):
-            # Enforce zero residual on Dirichlet boundaries.
-            boundary = (jnp.isclose(point[0], domain[0]) |
-                        jnp.isclose(point[0], domain[1]) |
-                        jnp.isclose(point[1], domain[0]) |
-                        jnp.isclose(point[1], domain[1]))
-
-            def compute_res(_):
-                u_val = u_single(point)
-                grad_u = jax.grad(u_single)(point)  # (du/dx, du/dy)
-
-                # Evaluate Gaussian coefficients.
-                kappa_val = gaussian_kappa(params_phys, point[0], point[1])
-                eta_val = gaussian_eta(params_phys, point[0], point[1])
-
-                # Compute divergence of (kappa * grad u).
-                def term_x(x_val):
-                    grad_u_x = jax.grad(u_single)(jnp.array([x_val, point[1]]))[0]
-                    return gaussian_kappa(params_phys, x_val, point[1]) * grad_u_x
-                dterm_x = jax.grad(term_x)(point[0])
-
-                def term_y(y_val):
-                    grad_u_y = jax.grad(u_single)(jnp.array([point[0], y_val]))[1]
-                    return gaussian_kappa(params_phys, point[0], y_val) * grad_u_y
-                dterm_y = jax.grad(term_y)(point[1])
-                divergence = dterm_x + dterm_y
-
-                # PDE residual: -divergence + eta*u - forcing_func
-                return -divergence + eta_val * u_val - forcing_func(point[0], point[1])
-
-            return jax.lax.cond(boundary, lambda _: 0.0, compute_res, operand=None)
-
-        # Evaluate the PDE loss over all collocation points.
-        res_vals = jax.vmap(residual_single)(pts_coll)
-        loss_pde = jnp.mean(res_vals**2)
-
-        # ----- Supervised Data Loss -----
-        pred_data = model_syn.apply(params_syn, pts_train[:, 0], pts_train[:, 1])
-        loss_data = jnp.mean((pred_data.flatten() - u_train.flatten())**2)
-
-        return loss_pde, loss_data
-
-    def loss_fn_pinn(params_phys, params_syn):
-        loss_pde, loss_data = loss_components(params_phys, params_syn)
-        total_loss = loss_pde + lambda_data * loss_data
-        return total_loss
-
-    @jax.jit
-    def train_step_pinn(state_phys, state_syn):
-        # Compute total loss and its gradients.
-        loss_val, grads = jax.value_and_grad(loss_fn_pinn, argnums=(0, 1))(
-            state_phys.params, state_syn.params)
-        grads_phys, grads_syn = grads
-
-        # Compute current PDE loss without affecting gradients.
-        current_loss_pde = loss_components(state_phys.params, state_syn.params)[0]
-
-        # If the PDE residual is too high, freeze the physics parameter update.
-        def freeze_if_high(loss, grad):
-            return jax.tree.map(lambda g: jnp.where(loss > pde_threshold, 0.0, g), grad)
-
-        grads_phys = freeze_if_high(current_loss_pde, grads_phys)
-
-        state_phys = state_phys.apply_gradients(grads=grads_phys)
-        state_syn  = state_syn.apply_gradients(grads=grads_syn)
-        return state_phys, state_syn, loss_val
-    
-    num_epochs = 3000
     loss_history = []
-    phys_state_history = []
-    
-    for epoch in range(num_epochs):
-        state_phys, state_syn, loss_val = train_step_pinn(state_phys, state_syn)
-        loss_history.append(jax.device_get(loss_val))
-        phys_state_history.append(state_phys.params)
-        if epoch % 100 == 0:
-            pde_loss = loss_components(state_phys.params, state_syn.params)[0]
-            print(f"[PINN] Epoch {epoch}, Loss: {loss_val:.6f}, PDE Loss: {pde_loss:.6f}, Phys Params: {state_phys.params}")
-    
-    return state_phys, state_syn, loss_history, phys_state_history
+    param_history = []
 
-# -----------------------------------------------------------------------------
+    # Create interior (collocation) points.
+    n_interior = 400
+    n_boundary = 400
+    loss_pinn = 1
+    rng = jax.random.PRNGKey(42)
+    for epoch in range(epochs):
+        if loss_pinn > 1e-1:
+            rng, rng1= jax.random.split(rng, 2)
+            x_in, y_in, x_b, y_b = pinn.create_collocation_points(n_interior, n_boundary, rng1)
+            loss_pinn = train_step_pinn(pinn, opt, x_in, y_in, x_b, y_b)
+            if epoch % 100 == 0:
+                print(f"Epoch {epoch}, PINN Loss: {loss_pinn}")
+            
+        else: 
+            rng, rng1= jax.random.split(rng, 2)
+            x_in, y_in, x_b, y_b = pinn.create_collocation_points(n_interior, n_boundary, rng1)
+            loss_val, loss_data = train_step(pinn, opt, xx_train, yy_train, u_train,
+                                x_in, y_in, x_b, y_b)
+            loss_pinn = loss_val - loss_data    
+            loss_history.append(loss_data)
+            param_history.append(pinn.parameters.value)
+            if epoch % 100 == 0:
+                print(f"Epoch {epoch}, PINN Loss: {loss_val}, PINN Parameters: {pinn.parameters.value}")
+
+    print(f"Final PINN model parameters: {pinn.parameters}")
+    return loss_history, param_history
+
+
 if __name__ == "__main__":
-    if input("Reproduce data? (y/n): ") == "y":
+    epochs = 3000
+    if input("Run the experiment? (y/n): ") == "y":
         
-        state_phys_pinn, state_syn_pinn, pinn_loss_hist, pinn_state_hist = pinn_training()
-        state_hyb, hyb_phys_loss_hist, hyb_metrics_hist, hyb_state_hist = hybrid_training()
-        state_phys, phys_loss_hist, phy_state_hist = phys_training()
-        # Save all in files
-        jnp.save("src/files/experiment_2/helmholtz_hybrid_loss.npy", hyb_phys_loss_hist)
-        jnp.save("src/files/experiment_2/helmholtz_hybrid_metrics.npy", hyb_metrics_hist)
-        jnp.save("src/files/experiment_2/helmholtz_hybrid_state_hist.npy", hyb_state_hist)
+        loss_history_pinn, param_history_pinn = trian_pinn(epochs)
+        loss_history_hyb, param_history_hyb = train_hybrid(epochs)
+        loss_history_fem, param_history_fem = train_fem(epochs)
 
-        jnp.save("src/files/experiment_2/helmholtz_phys_loss.npy", phys_loss_hist)
-        jnp.save("src/files/experiment_2/helmholtz_phys_state_hist.npy", phy_state_hist)
-
-        jnp.save("src/files/experiment_2/helmholtz_pinn_loss.npy", pinn_loss_hist)
-        jnp.save("src/files/experiment_2/helmholtz_pinn_state_hist.npy", pinn_state_hist)
+        # convert them to njp arrays
+        loss_history_hyb = jnp.array(loss_history_hyb)
+        loss_history_fem = jnp.array(loss_history_fem)
+        loss_history_pinn = jnp.array(loss_history_pinn)
+        param_history_hyb = jnp.array(param_history_hyb)
+        param_history_fem = jnp.array(param_history_fem)
+        param_history_pinn = jnp.array(param_history_pinn)
         
 
+        # Save the results.
+        jnp.save("src/files/experiment_2/hybrid_loss.npy", loss_history_hyb)
+        jnp.save("src/files/experiment_2/hybrid_params.npy", param_history_hyb)
+        jnp.save("src/files/experiment_2/fem_loss.npy", loss_history_fem)
+        jnp.save("src/files/experiment_2/fem_params.npy", param_history_fem)
+        jnp.save("src/files/experiment_2/pinn_loss.npy", loss_history_pinn)
+        jnp.save("src/files/experiment_2/pinn_params.npy", param_history_pinn)
     else:
-        hyb_phys_loss_hist = jnp.load("src/files/experiment_2/helmholtz_hybrid_loss.npy", allow_pickle=True)
-        hyb_metrics_hist = jnp.load("src/files/experiment_2/helmholtz_hybrid_metrics.npy", allow_pickle=True)
-        hyb_state_hist = jnp.load("src/files/experiment_2/helmholtz_hybrid_state_hist.npy", allow_pickle=True)
+        loss_history_hyb = jnp.load("src/files/experiment_2/hybrid_loss.npy")
+        loss_history_fem = jnp.load("src/files/experiment_2/fem_loss.npy")
+        loss_history_pinn = jnp.load("src/files/experiment_2/pinn_loss.npy")
+        param_history_hyb = jnp.load("src/files/experiment_2/hybrid_params.npy")
+        param_history_fem = jnp.load("src/files/experiment_2/fem_params.npy")
+        param_history_pinn = jnp.load("src/files/experiment_2/pinn_params.npy")
 
-        phys_loss_hist = jnp.load("src/files/experiment_2/helmholtz_phys_loss.npy", allow_pickle=True)
-        phy_state_hist = jnp.load("src/files/experiment_2/helmholtz_phys_state_hist.npy", allow_pickle=True)
 
-        pinn_loss_hist = jnp.load("src/files/experiment_2/helmholtz_pinn_loss.npy", allow_pickle=True)
-        pinn_state_hist = jnp.load("src/files/experiment_2/helmholtz_pinn_state_hist.npy", allow_pickle=True)
 
+    # If the history is not equal to epochs, pad it at the start with the initial value
+    if len(loss_history_hyb) < epochs:
+        loss_history_hyb = jnp.pad(loss_history_hyb, (epochs - len(loss_history_hyb), 0), mode="constant", constant_values=loss_history_hyb[0])
+    if len(loss_history_fem) < epochs:
+        loss_history_fem = jnp.pad(loss_history_fem, (epochs - len(loss_history_fem), 0), mode="constant", constant_values=loss_history_fem[0])
+    if len(loss_history_pinn) < epochs:
+        loss_history_pinn = jnp.pad(loss_history_pinn, (epochs - len(loss_history_pinn), 0), mode="constant", constant_values=loss_history_pinn[0])
+    if len(param_history_hyb) < epochs:
+        param_history_hyb = jnp.pad(param_history_hyb, ((epochs - len(param_history_hyb), 0), (0, 0)), mode="edge")
+    if len(param_history_fem) < epochs:
+        param_history_fem = jnp.pad(param_history_fem, ((epochs - len(param_history_fem), 0), (0, 0)), mode="edge")
+    if len(param_history_pinn) < epochs:
+        param_history_pinn = jnp.pad(param_history_pinn, ((epochs - len(param_history_pinn), 0), (0, 0)), mode="edge")
+    
+    # Plot the results.
     plot(
-    phy_state_hist,
-    hyb_state_hist,
-    pinn_state_hist,      # New argument for PINN training results.
+    param_history_fem,
+    param_history_hyb,
+    param_history_pinn,      # New argument for PINN training results.
     true_params,
-    phys_loss_hist,
-    hyb_phys_loss_hist,
-    pinn_loss_hist,          # New loss history for PINN.
-    gaussian_kappa,
-    gaussian_eta,
+    loss_history_fem,
+    loss_history_hyb,
+    loss_history_pinn,          # New loss history for PINN.
+    kappa,
+    eta,
     pts_train,
     domain=(-3.0, 3.0),
     N=100,
@@ -446,17 +403,24 @@ if __name__ == "__main__":
     )
 
     animate(
-    phy_state_hist,
-    hyb_state_hist,
-    pinn_state_hist,      # New argument for PINN training results.
+    param_history_fem,
+    param_history_hyb,
+    param_history_pinn,      # New argument for PINN training results.
     true_params,
-    phys_loss_hist,
-    hyb_phys_loss_hist,
-    pinn_loss_hist,          # New loss history for PINN.
-    gaussian_kappa,
-    gaussian_eta,
+    loss_history_fem,
+    loss_history_hyb,
+    loss_history_pinn,          # New loss history for PINN.
+    kappa,
+    eta,
     pts_train,
     domain=(-3.0, 3.0),
     N=100,
     filename="experiment_2/experiment_2"
     )
+
+
+    
+    
+
+
+    
