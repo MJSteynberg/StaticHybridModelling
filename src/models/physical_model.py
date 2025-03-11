@@ -26,10 +26,10 @@ class PhysicalModel(nnx.Module):
         self.training = training
 
     def __call__(self, x: float, y: float) -> float:
-        if self.changed | self.training:
-            self.fem = self._assemble_fem(self.mesh)
-            self.solution = self._solve_pde(self.mesh, self.fem)
-            self.changed = False
+        
+        self.fem = self._assemble_fem(self.mesh)
+        self.solution = self._solve_pde(self.mesh, self.fem)
+        self.changed = False
         pts = jnp.array([x, y]).reshape(1, 2)
         # Create the interpolator on the fly so that no non‑array object is stored.
         interp = jsp.interpolate.RegularGridInterpolator(

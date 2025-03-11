@@ -2,6 +2,7 @@ import os
 import sys
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import matplotlib.pyplot as plt
 from functools import partial
@@ -80,6 +81,7 @@ def train_hybrid(epochs):
         amplitudes[0], centers_x[0], centers_y[0],
         amplitudes[1], centers_x[1], centers_y[1]
     ]))
+    print(init_params)
     physical_model = PhysicalModel(
         domain=domain,
         N=low_res_N,
@@ -166,7 +168,20 @@ def train_hybrid(epochs):
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}, Loss (physical): {loss_phy_data}, Loss (synthetic): {loss_syn}, Parameters: {physical_model.parameters.value}")
 
-    return loss_history, param_history
+    #full error on the whole domain
+    x = jnp.linspace(-3, 3, 100)
+    y = jnp.linspace(-3, 3, 100)
+    x, y = jnp.meshgrid(x, y)
+    x = x.flatten()
+    y = y.flatten()
+    u_phys = vmapped_model(physical_model, x, y)
+    u_syn = vmapped_model(synthetic_model, x, y)
+    u_t = u_true(x, y, 6)
+    error_phys = optax.squared_error(u_phys.flatten(), u_t.flatten()).mean()
+    error_syn = optax.squared_error(u_syn.flatten(), u_t.flatten()).mean()
+
+
+    return loss_history, param_history, error_phys, error_syn
 
 def train_fem(epochs):
     # -------------------------------------------------------------------------
@@ -222,7 +237,17 @@ def train_fem(epochs):
         if epoch % 100 == 0:
             print(f"Epoch {epoch}, Loss (physical): {loss_phy}, Parameters: {physical_model.parameters.value}")
 
-    return loss_history, param_history
+    #full error on the whole domain
+    x = jnp.linspace(-3, 3, 100)
+    y = jnp.linspace(-3, 3, 100)
+    x, y = jnp.meshgrid(x, y)
+    x = x.flatten()
+    y = y.flatten()
+    u_pred = vmapped_model(physical_model, x, y)
+    u_t = u_true(x, y, 6)
+    error = optax.squared_error(u_pred.flatten(), u_t.flatten()).mean()
+
+    return loss_history, param_history, error
 
 
 def trian_pinn(epochs):
@@ -333,16 +358,28 @@ def trian_pinn(epochs):
                 print(f"Epoch {epoch}, PINN Loss: {loss_val}, PINN Parameters: {pinn.parameters.value}")
 
     print(f"Final PINN model parameters: {pinn.parameters}")
-    return loss_history, param_history
+
+    #full error on the whole domain
+    x = jnp.linspace(-3, 3, 100)
+    y = jnp.linspace(-3, 3, 100)
+    x, y = jnp.meshgrid(x, y)
+    x = x.flatten()
+    y = y.flatten()
+    u_pred = vmapped_model(pinn, x, y)
+    u_t = u_true(x, y, 6)
+    error = optax.squared_error(u_pred.flatten(), u_t.flatten()).mean()
+
+    return loss_history, param_history, error
 
 
 if __name__ == "__main__":
     epochs = 3000
     if input("Run the experiment? (y/n): ") == "y":
         
-        loss_history_pinn, param_history_pinn = trian_pinn(epochs)
-        loss_history_hyb, param_history_hyb = train_hybrid(epochs)
-        loss_history_fem, param_history_fem = train_fem(epochs)
+        
+        loss_history_hyb, param_history_hyb, error_hyb_phys, error_hyb_syn = train_hybrid(epochs)
+        loss_history_pinn, param_history_pinn, error_pinn = trian_pinn(epochs)
+        loss_history_fem, param_history_fem, error_fem = train_fem(epochs)
 
         # convert them to njp arrays
         loss_history_hyb = jnp.array(loss_history_hyb)
@@ -360,6 +397,10 @@ if __name__ == "__main__":
         jnp.save("src/files/experiment_1/fem_params.npy", param_history_fem)
         jnp.save("src/files/experiment_1/pinn_loss.npy", loss_history_pinn)
         jnp.save("src/files/experiment_1/pinn_params.npy", param_history_pinn)
+
+        all_errors = jnp.array([error_fem, error_hyb_phys, error_hyb_syn, error_pinn])
+        # save as txt file
+        np.savetxt("src/files/experiment_1/errors.txt", all_errors)
     else:
         loss_history_hyb = jnp.load("src/files/experiment_1/hybrid_loss.npy")
         loss_history_fem = jnp.load("src/files/experiment_1/fem_loss.npy")
@@ -384,7 +425,6 @@ if __name__ == "__main__":
     if len(param_history_pinn) < epochs:
         param_history_pinn = jnp.pad(param_history_pinn, ((epochs - len(param_history_pinn), 0), (0, 0)), mode="edge")
     
-    # Plot the results.
     plot(
     param_history_fem,
     param_history_hyb,
@@ -400,6 +440,7 @@ if __name__ == "__main__":
     N=100,
     filename="experiment_1/experiment_1"
     )
+
 
     animate(
     param_history_fem,

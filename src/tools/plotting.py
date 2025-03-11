@@ -113,7 +113,8 @@ def plot(
     # Scatter training data on all subplots.
     for ax in [ax0, ax1, ax2, ax3, ax4, ax5, ax6, ax7]:
         ax.scatter(pts_train[:, 0], pts_train[:, 1], marker="o",
-                   c="black", s=20, edgecolors="white")
+                   c="red", s=15)
+
 
     # Add a unified colorbar.
     ax_cb = fig.add_subplot(gs_top[:, 4])
@@ -142,7 +143,139 @@ def plot(
 
     # Add row labels on the left (at fixed positions).
     fig.text(0.04, 0.81, r"$\kappa$", ha="center", va="center", fontsize=22)
-    fig.text(0.04, 0.57, r"$\eta$", ha="center", va="center", fontsize=22)
+    fig.text(0.04, 0.57, r"$\eta^2$", ha="center", va="center", fontsize=22)
+
+    plt.savefig(filename)
+    plt.close(fig)
+
+def plot_without_loss(
+    phy_state_history,
+    hyb_state_history,
+    pinn_state_history,      # Still required.
+    true_params,
+    phys_loss_hist,
+    hyb_phys_loss_hist,
+    pinn_loss_hist,          # Still required.
+    kappa_func,
+    eta_func,
+    pts_train,
+    domain=(-3.0, 3.0),
+    N=100,
+    filename="final_evolution"
+):
+    """
+    Creates a static plot showing the final predictions for Physics, PINN, Hybrid, and True.
+    Also plots their loss history along with column and row labels.
+    """
+    # Extract final states.
+    final_phy  = phy_state_history[-1]
+    final_pinn = pinn_state_history[-1]  # PINN now second column.
+    final_hyb  = hyb_state_history[-1]   # Hybrid now third column.
+    final_true = true_params
+
+    # Build a shared grid.
+    x = jnp.linspace(domain[0], domain[1], N)
+    y = jnp.linspace(domain[0], domain[1], N)
+    xx, yy = jnp.meshgrid(x, y)
+    xx_flat = xx.flatten()
+    yy_flat = yy.flatten()
+
+    filename = f"src/results/{filename}.png"
+
+    # Compute predictions.
+    kappa_phy  = kappa_func(final_phy,  xx_flat, yy_flat)
+    kappa_pinn = kappa_func(final_pinn, xx_flat, yy_flat)
+    kappa_hyb  = kappa_func(final_hyb,  xx_flat, yy_flat)
+    kappa_true = kappa_func(final_true, xx_flat, yy_flat)
+    eta_phy    = eta_func(final_phy,  xx_flat, yy_flat)
+    eta_pinn   = eta_func(final_pinn, xx_flat, yy_flat)
+    eta_hyb    = eta_func(final_hyb,  xx_flat, yy_flat)
+    eta_true   = eta_func(final_true, xx_flat, yy_flat)
+
+    # Compute the global min/max from the true predictions.
+    vmin = float(jnp.floor(jnp.min(jnp.array([kappa_true, eta_true]))))
+    vmax = float(jnp.ceil(jnp.max(jnp.array([kappa_true, eta_true]))))
+
+    # Create figure layout: 4 columns for predictions + a colorbar.
+    fig = plt.figure(figsize=(12, 5))
+    gs_top = fig.add_gridspec(
+        2, 5, width_ratios=[1, 1, 1, 1, 0.2],
+        left=0.07, right=0.93, top=0.93, bottom=0.07,
+        wspace=0.1, hspace=0.1
+    )
+
+    # Row 1: Kappa plots.
+    ax0 = fig.add_subplot(gs_top[0, 0])
+    cf0 = ax0.contourf(xx, yy, kappa_phy.reshape(xx.shape), levels=100,
+                         vmin=vmin, vmax=vmax, cmap="viridis")
+    ax0.set_xticks([])
+    ax0.set_yticks([])
+
+    ax1 = fig.add_subplot(gs_top[0, 1])
+    cf1 = ax1.contourf(xx, yy, kappa_pinn.reshape(xx.shape), levels=100,
+                         vmin=vmin, vmax=vmax, cmap="viridis")
+    ax1.set_xticks([])
+    ax1.set_yticks([])
+
+    ax2 = fig.add_subplot(gs_top[0, 2])
+    cf2 = ax2.contourf(xx, yy, kappa_hyb.reshape(xx.shape), levels=100,
+                         vmin=vmin, vmax=vmax, cmap="viridis")
+    ax2.set_xticks([])
+    ax2.set_yticks([])
+
+    ax3 = fig.add_subplot(gs_top[0, 3])
+    cf3 = ax3.contourf(xx, yy, kappa_true.reshape(xx.shape), levels=100,
+                         vmin=vmin, vmax=vmax, cmap="viridis")
+    ax3.set_xticks([])
+    ax3.set_yticks([])
+
+    # Row 2: Eta plots.
+    ax4 = fig.add_subplot(gs_top[1, 0])
+    cf4 = ax4.contourf(xx, yy, eta_phy.reshape(xx.shape), levels=100,
+                         vmin=vmin, vmax=vmax, cmap="viridis")
+    ax4.set_xticks([])
+    ax4.set_yticks([])
+
+    ax5 = fig.add_subplot(gs_top[1, 1])
+    cf5 = ax5.contourf(xx, yy, eta_pinn.reshape(xx.shape), levels=100,
+                         vmin=vmin, vmax=vmax, cmap="viridis")
+    ax5.set_xticks([])
+    ax5.set_yticks([])
+
+    ax6 = fig.add_subplot(gs_top[1, 2])
+    cf6 = ax6.contourf(xx, yy, eta_hyb.reshape(xx.shape), levels=100,
+                         vmin=vmin, vmax=vmax, cmap="viridis")
+    ax6.set_xticks([])
+    ax6.set_yticks([])
+
+    ax7 = fig.add_subplot(gs_top[1, 3])
+    cf7 = ax7.contourf(xx, yy, eta_true.reshape(xx.shape), levels=100,
+                         vmin=vmin, vmax=vmax, cmap="viridis")
+    ax7.set_xticks([])
+    ax7.set_yticks([])
+
+    # Scatter training data on all subplots.
+    for ax in [ax0, ax1, ax2, ax3, ax4, ax5, ax6, ax7]:
+        ax.scatter(pts_train[:, 0], pts_train[:, 1], marker="o",
+                   c="red", s=15)
+
+    # Add a unified colorbar.
+    ax_cb = fig.add_subplot(gs_top[:, 4])
+    norm = Normalize(vmin=vmin, vmax=vmax)
+    mappable = ScalarMappable(norm=norm, cmap="viridis")
+    mappable.set_array([])
+    cb = fig.colorbar(mappable, cax=ax_cb)
+    cb.set_label("Parameter Value", fontsize=14)
+
+    # Add column labels (above the grid).
+    # The grid spans from left=0.07 to right=0.93 (width = 0.86). We split this into 4 columns.
+    col_centers = [0.07 + 0.81 * (i + 0.5) / 4 for i in range(4)]
+    for label, x_pos in zip(["FEM", "PINN", "HYCO", "True"], col_centers):
+        fig.text(x_pos, 0.96, label, ha="center", va="center", fontsize=18)
+
+    # Add row labels on the left (at fixed positions).
+    fig.text(0.04, 0.74, r"$\kappa$", ha="center", va="center", fontsize=22)
+    fig.text(0.04, 0.27, r"$\eta^2$", ha="center", va="center", fontsize=22)
 
     plt.savefig(filename)
     plt.close(fig)
@@ -240,7 +373,7 @@ def animate(
 
     # Add row labels on the left (at fixed positions).
     fig.text(0.04, 0.81, r"$\kappa$", ha="center", va="center", fontsize=22)
-    fig.text(0.04, 0.57, r"$\eta$", ha="center", va="center", fontsize=22)
+    fig.text(0.04, 0.57, r"$\eta^2$", ha="center", va="center", fontsize=22)
 
     epochs = min(len(phy_state_history), len(hyb_state_history), len(pinn_state_history))
 
