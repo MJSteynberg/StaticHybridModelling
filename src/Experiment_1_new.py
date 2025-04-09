@@ -51,17 +51,15 @@ def f(x, y):
 
 
 
-subdomain=[(-3, 3), (-3, 3)]
-n_train=5
-xx_train = jnp.linspace(subdomain[0][0], subdomain[0][1], n_train)
-yy_train = jnp.linspace(subdomain[1][0], subdomain[1][1], n_train)
-xx_train, yy_train = jnp.meshgrid(xx_train, yy_train)
-xx_train = xx_train.flatten()
-yy_train = yy_train.flatten()
+subdomain=[(0.0, pi), (0.0, pi)]
+n_train=25
+rng_x, rng_y = jax.random.split(jax.random.PRNGKey(6))
+xx_train = jax.random.uniform(rng_x, shape=(n_train,), minval=subdomain[0][0], maxval=subdomain[0][1])
+yy_train = jax.random.uniform(rng_y, shape=(n_train,), minval=subdomain[1][0], maxval=subdomain[1][1])
 pts_train = jnp.stack([xx_train, yy_train], axis=-1)
 
-xx_eval = jnp.linspace(subdomain[0][0], subdomain[0][1], 50)
-yy_eval = jnp.linspace(subdomain[1][0], subdomain[1][1], 50)
+xx_eval = jnp.linspace(-pi, pi, 50)
+yy_eval = jnp.linspace(-pi, pi, 50)
 xx_eval, yy_eval = jnp.meshgrid(xx_eval, yy_eval)
 xx_eval = xx_eval.flatten()
 yy_eval = yy_eval.flatten()
@@ -70,11 +68,40 @@ pts_eval = jnp.stack([xx_eval, yy_eval], axis=-1)
 u_train = u_true(xx_train, yy_train, L).reshape(-1, 1)
 print(f"Training data generated with shape: {u_train.shape}")
 
+# from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+# # plot u, kappa, eta, and f with improved formatting using contourf with 100 levels
+# plt.figure(figsize=(16, 4))
+# plot_data = [
+#     (u_true(xx_eval, yy_eval, L).reshape(100, 100), r'$u$'),
+#     (kappa(true_params, xx_eval, yy_eval).reshape(100, 100), r'$\kappa$'),
+#     (np.sqrt(eta(true_params, xx_eval, yy_eval)).reshape(100, 100), r'$\eta$'),
+#     (f_full(true_params, xx_eval, yy_eval, L).reshape(100, 100), r'$f$'),
+# ]
+
+# for i, (data, label) in enumerate(plot_data, start=1):
+#     ax = plt.subplot(1, 4, i)
+#     im = ax.contourf(data, levels=100, cmap='viridis')
+#     ax.set_title(label, fontsize=18)
+#     ax.set_xticks([])
+#     ax.set_yticks([])
+#     ax.set_aspect('equal')
+#     # Create an axes on the right side of ax, make the colorbar broader.
+#     divider = make_axes_locatable(ax)
+#     cax = divider.append_axes("right", size="16%", pad=0.1)
+#     # Set the colorbar to display 5 ticks.
+#     plt.colorbar(im, cax=cax, ticks=np.linspace(int(im.get_clim()[0]), int(im.get_clim()[1]), 5))
+
+# plt.tight_layout()
+# plt.savefig("src/ground.png")
+# plt.show()
+
+
 def train_hybrid(epochs):
     # -------------------------------------------------------------------------
     # Initialize the synthetic model.
     synthetic_model = ResNetSynthetic(
-        hidden_dims=(128,128), 
+        hidden_dims=(256,256), 
         activation=nnx.relu, 
         output_dim=1, 
         rngs=nnx.Rngs(0)
@@ -91,6 +118,7 @@ def train_hybrid(epochs):
         amplitudes[0], centers_x[0], centers_y[0],
         amplitudes[1], centers_x[1], centers_y[1]
     ]))
+    print(f"Initial parameters: {init_params}")
     physical_model = PhysicalModel(
         domain=domain,
         N=low_res_N,
@@ -203,6 +231,7 @@ def train_fem(epochs):
         amplitudes[0], centers_x[0], centers_y[0],
         amplitudes[1], centers_x[1], centers_y[1]
     ]))
+    print(f"Initial parameters: {init_params}")
     physical_model = PhysicalModel(
         domain=domain,
         N=low_res_N,
@@ -263,8 +292,9 @@ def trian_pinn(epochs):
         amplitudes[0], centers_x[0], centers_y[0],
         amplitudes[1], centers_x[1], centers_y[1]
     ]))
+    print(f"Initial parameters: {init_params}")
     model = ResNetSynthetic(
-        hidden_dims=(128,128), 
+        hidden_dims=(256,256), 
         activation=nnx.tanh, 
         output_dim=1, 
         rngs=nnx.Rngs(0)
@@ -365,6 +395,7 @@ def trian_pinn(epochs):
                 print(f"Epoch {epoch}, PINN Loss: {loss_val}, PINN Parameters: {pinn.parameters.value}")
 
     print(f"Final PINN model parameters: {pinn.parameters}")
+
     return loss_history, param_history, u_pred
 
 
@@ -391,32 +422,32 @@ if __name__ == "__main__":
         u_fem = jnp.array(u_fem)
         u_pinn = jnp.array(u_pinn)
         
-        
 
         # Save the results.
-        jnp.save("src/files/experiment_baseline/hybrid_loss_phys.npy", loss_history_hyb_phys)
-        jnp.save("src/files/experiment_baseline/hybrid_loss_syn.npy", loss_history_hyb_syn)
-        jnp.save("src/files/experiment_baseline/hybrid_params.npy", param_history_hyb)
-        jnp.save("src/files/experiment_baseline/fem_loss.npy", loss_history_fem)
-        jnp.save("src/files/experiment_baseline/fem_params.npy", param_history_fem)
-        jnp.save("src/files/experiment_baseline/pinn_loss.npy", loss_history_pinn)
-        jnp.save("src/files/experiment_baseline/pinn_params.npy", param_history_pinn)
-        jnp.save("src/files/experiment_baseline/hybrid_u_phys.npy", u_hyb_phys)
-        jnp.save("src/files/experiment_baseline/hybrid_u_syn.npy", u_hyb_syn)
-        jnp.save("src/files/experiment_baseline/fem_u.npy", u_fem)
-        jnp.save("src/files/experiment_baseline/pinn_u.npy", u_pinn)
+        jnp.save("src/files/experiment_1/hybrid_loss_phys_new.npy", loss_history_hyb_phys)
+        jnp.save("src/files/experiment_1/hybrid_loss_syn_new.npy", loss_history_hyb_syn)
+        jnp.save("src/files/experiment_1/hybrid_params_new.npy", param_history_hyb)
+        jnp.save("src/files/experiment_1/fem_loss_new.npy", loss_history_fem)
+        jnp.save("src/files/experiment_1/fem_params_new.npy", param_history_fem)
+        jnp.save("src/files/experiment_1/pinn_loss_new.npy", loss_history_pinn)
+        jnp.save("src/files/experiment_1/pinn_params_new.npy", param_history_pinn)
+        jnp.save("src/files/experiment_1/u_hyb_phys_new.npy", u_hyb_phys)
+        jnp.save("src/files/experiment_1/u_hyb_syn_new.npy", u_hyb_syn)
+        jnp.save("src/files/experiment_1/u_fem_new.npy", u_fem)
+        jnp.save("src/files/experiment_1/u_pinn_new.npy", u_pinn)
+
     else:
-        loss_history_hyb_phys = np.load("src/files/experiment_baseline/hybrid_loss_phys.npy")
-        loss_history_hyb_syn = np.load("src/files/experiment_baseline/hybrid_loss_syn.npy")
-        loss_history_fem = np.load("src/files/experiment_baseline/fem_loss.npy")
-        loss_history_pinn = np.load("src/files/experiment_baseline/pinn_loss.npy")
-        param_history_hyb = np.load("src/files/experiment_baseline/hybrid_params.npy")
-        param_history_fem = np.load("src/files/experiment_baseline/fem_params.npy")
-        param_history_pinn = np.load("src/files/experiment_baseline/pinn_params.npy")
-        u_hyb_phys = np.load("src/files/experiment_baseline/hybrid_u_phys.npy")
-        u_hyb_syn = np.load("src/files/experiment_baseline/hybrid_u_syn.npy")
-        u_fem = np.load("src/files/experiment_baseline/fem_u.npy")
-        u_pinn = np.load("src/files/experiment_baseline/pinn_u.npy")
+        loss_history_hyb_phys = np.load("src/files/experiment_1/hybrid_loss_phys_new.npy")
+        loss_history_hyb_syn = np.load("src/files/experiment_1/hybrid_loss_syn_new.npy")
+        loss_history_fem = np.load("src/files/experiment_1/fem_loss_new.npy")
+        loss_history_pinn = np.load("src/files/experiment_1/pinn_loss_new.npy")
+        param_history_hyb = np.load("src/files/experiment_1/hybrid_params_new.npy")
+        param_history_fem = np.load("src/files/experiment_1/fem_params_new.npy")
+        param_history_pinn = np.load("src/files/experiment_1/pinn_params_new.npy")
+        u_hyb_phys = np.load("src/files/experiment_1/u_hyb_phys_new.npy")
+        u_hyb_syn = np.load("src/files/experiment_1/u_hyb_syn_new.npy")
+        u_fem = np.load("src/files/experiment_1/u_fem_new.npy")
+        u_pinn = np.load("src/files/experiment_1/u_pinn_new.npy")
 
     def replace_zeros_linear(arr):
         """
@@ -454,7 +485,7 @@ if __name__ == "__main__":
     u_fem=u_fem,
     u_pinn=u_pinn,
     u_true=u_true(xx_eval, yy_eval, L).reshape(-1, 1),
-    filename="experiment_baseline/experiment_baseline"
+    filename="experiment_1/experiment_1_new"
     )
 
     animate(
@@ -470,7 +501,7 @@ if __name__ == "__main__":
     pts_train,
     domain=(-pi, pi),
     N=100,
-    filename="experiment_baseline/experiment_baseline"
+    filename="experiment_1/experiment_1_new"
     )
 
 

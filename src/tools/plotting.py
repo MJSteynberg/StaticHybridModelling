@@ -4,6 +4,21 @@ import matplotlib.pyplot as plt
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import matplotlib.animation as animation
+import numpy as np
+def moving_avg_std(loss, window=10):
+    """
+    Returns the moving average, standard deviation, and x-axis (epoch indices)
+    for a given loss history array.
+    """
+    if len(loss) < window:
+        # Not enough points for moving stats, so return original arrays.
+        x = np.arange(len(loss))
+        return x, loss, np.zeros_like(loss)
+    avg = np.convolve(loss, np.ones(window)/window, mode='valid')
+    std = np.array([np.std(loss[i:i+window]) for i in range(len(loss)-window+1)])
+    x = np.arange(window-1, len(loss))
+    return x, avg, std
+
 def plot(
     phy_state_history,
     hyb_state_history,
@@ -17,6 +32,12 @@ def plot(
     pts_train,
     domain=(-3.0, 3.0),
     N=100,
+    hyb_synth_loss_hist=None,
+    u_hyb_phys=None,
+    u_hyb_syn=None,
+    u_fem=None,
+    u_pinn=None,
+    u_true=None,
     filename="final_evolution"
 ):
     """
@@ -53,9 +74,9 @@ def plot(
     vmax = float(jnp.ceil(jnp.max(jnp.array([kappa_true, eta_true]))))
 
     # Create figure layout: 4 columns for predictions + a colorbar.
-    fig = plt.figure(figsize=(12, 10))
+    fig = plt.figure(figsize=(12, 14))
     gs_top = fig.add_gridspec(
-        2, 5, width_ratios=[1, 1, 1, 1, 0.2],
+        3, 5, width_ratios=[1, 1, 1, 1, 0.2],
         left=0.07, right=0.93, top=0.93, bottom=0.45,
         wspace=0.1, hspace=0.1
     )
@@ -114,36 +135,132 @@ def plot(
     for ax in [ax0, ax1, ax2, ax3, ax4, ax5, ax6, ax7]:
         ax.scatter(pts_train[:, 0], pts_train[:, 1], marker="o",
                    c="red", s=15)
+        
+    N = int(np.sqrt(u_hyb_phys.shape[0]))
+    sol = [N, N]
+    vmin = -1 #min(u_hyb_phys.min(), u_fem.min(), u_pinn.min(), u_true.min())
+    vmax = 1 # max(u_hyb_phys.max(), u_fem.max(), u_pinn.max(), u_true.max())
+    xx = jnp.linspace(domain[0], domain[1], N)
+    yy = jnp.linspace(domain[0], domain[1], N)
+    # Plot the solutions 
+    ax8 = fig.add_subplot(gs_top[2, 0])
+    cf8 = ax8.contourf(xx, yy, u_fem.reshape(sol), levels=100,
+                            vmin=vmin, vmax=vmax, cmap="viridis")
+    ax8.set_xticks([])
+    ax8.set_yticks([])
 
+    ax9 = fig.add_subplot(gs_top[2, 1])
+    cf9 = ax9.contourf(xx, yy, u_pinn.reshape(sol), levels=100,
+                            vmin=vmin, vmax=vmax, cmap="viridis")
+    ax9.set_xticks([])
+    ax9.set_yticks([])
 
-    # Add a unified colorbar.
-    ax_cb = fig.add_subplot(gs_top[:, 4])
+    ax10 = fig.add_subplot(gs_top[2, 2])
+    cf10 = ax10.contourf(xx, yy, u_hyb_phys.reshape(sol), levels=100,
+                            vmin=vmin, vmax=vmax, cmap="viridis")
+    ax10.set_xticks([])
+    ax10.set_yticks([])
+
+    ax11 = fig.add_subplot(gs_top[2, 3])
+    cf11 = ax11.contourf(xx, yy, u_true.reshape(sol), levels=100,
+                            vmin=vmin, vmax=vmax, cmap="viridis")
+    ax11.set_xticks([])
+    ax11.set_yticks([])
+    
+    # Add a unified colorbar for gaussians
+    ax_cb = fig.add_subplot(gs_top[:2, 4])
     norm = Normalize(vmin=vmin, vmax=vmax)
     mappable = ScalarMappable(norm=norm, cmap="viridis")
     mappable.set_array([])
     cb = fig.colorbar(mappable, cax=ax_cb)
     cb.set_label("Parameter Value", fontsize=14)
 
-    # Plot the loss history.
-    ax_loss = fig.add_axes([0.07, 0.07, 0.86, 0.3])
-    ax_loss.plot(phys_loss_hist, label="Physics Loss")
-    ax_loss.plot(pinn_loss_hist, label="PINN Loss", linestyle=":")
-    ax_loss.plot(hyb_phys_loss_hist, label="Hybrid Loss", linestyle="--")
-    ax_loss.set_yscale("log")
-    ax_loss.set_title("Loss History", fontsize=14)
-    ax_loss.set_xlabel("Epoch", fontsize=12)
-    ax_loss.set_ylabel("Loss", fontsize=12)
-    ax_loss.legend(fontsize=12)
+    # Add a unified colorbar for solutions
+    
+    ax_cb = fig.add_subplot(gs_top[2:3, 4])
+    norm = Normalize(vmin=vmin, vmax=vmax)
+    mappable = ScalarMappable(norm=norm, cmap="viridis")
+    mappable.set_array([])
+    cb = fig.colorbar(mappable, cax=ax_cb)
+    cb.set_label("Solution Value", fontsize=14)
 
-    # Add column labels (above the grid).
-    # The grid spans from left=0.07 to right=0.93 (width = 0.86). We split this into 4 columns.
-    col_centers = [0.07 + 0.81 * (i + 0.5) / 4 for i in range(4)]
-    for label, x_pos in zip(["Physics", "PINN", "Hybrid", "True"], col_centers):
-        fig.text(x_pos, 0.96, label, ha="center", va="center", fontsize=18)
 
-    # Add row labels on the left (at fixed positions).
-    fig.text(0.04, 0.81, r"$\kappa$", ha="center", va="center", fontsize=22)
-    fig.text(0.04, 0.57, r"$\eta^2$", ha="center", va="center", fontsize=22)
+    if hyb_synth_loss_hist is None:
+        # Add a unified colorbar.
+        ax_cb = fig.add_subplot(gs_top[:, 4])
+        norm = Normalize(vmin=vmin, vmax=vmax)
+        mappable = ScalarMappable(norm=norm, cmap="viridis")
+        mappable.set_array([])
+        cb = fig.colorbar(mappable, cax=ax_cb)
+        cb.set_label("Parameter Value", fontsize=14)
+
+        # Plot the loss history.
+        ax_loss = fig.add_axes([0.07, 0.07, 0.86, 0.3])
+        ax_loss.plot(phys_loss_hist, label="FEM")
+        ax_loss.plot(pinn_loss_hist, label="PINN", linestyle=":")
+        ax_loss.plot(hyb_phys_loss_hist, label="HYCO", linestyle="--")
+        ax_loss.set_yscale("log")
+        ax_loss.set_title("Mean Squared Error History", fontsize=14)
+        ax_loss.set_xlabel("Epoch", fontsize=12)
+        ax_loss.set_ylabel("Loss", fontsize=12)
+        ax_loss.legend(fontsize=12)
+
+        # Add column labels (above the grid).
+        # The grid spans from left=0.07 to right=0.93 (width = 0.86). We split this into 4 columns.
+        col_centers = [0.07 + 0.81 * (i + 0.5) / 4 for i in range(4)]
+        for label, x_pos in zip(["FEM", "PINN", "HYCO", "True"], col_centers):
+            fig.text(x_pos, 0.96, label, ha="center", va="center", fontsize=18)
+
+        # Add row labels on the left (at fixed positions).
+        fig.text(0.04, 0.81, r"$\kappa$", ha="center", va="center", fontsize=22)
+        fig.text(0.04, 0.57, r"$\eta$", ha="center", va="center", fontsize=22)
+    else:
+        
+        window = 100
+        # Plot the loss history.
+        ax_loss = fig.add_axes([0.07, 0.07, 0.86, 0.3])
+        # Plot the loss history with moving average and shading.
+        x_phys, avg_phys, std_phys = moving_avg_std(phys_loss_hist, window=window)
+        ax_loss.plot(x_phys, avg_phys, label="FEM Error")
+        ax_loss.fill_between(x_phys, avg_phys - std_phys, avg_phys + std_phys, alpha=0.3)
+
+        x_pinn, avg_pinn, std_pinn = moving_avg_std(pinn_loss_hist, window=window)
+        ax_loss.plot(x_pinn, avg_pinn, label="PINN Error", linestyle=":")
+        ax_loss.fill_between(x_pinn, avg_pinn - std_pinn, avg_pinn + std_pinn, alpha=0.3)
+
+        x_hyb, avg_hyb, std_hyb = moving_avg_std(hyb_phys_loss_hist, window=window)
+        ax_loss.plot(x_hyb, avg_hyb, label="HYCO Physical Error", linestyle="--")
+        ax_loss.fill_between(x_hyb, avg_hyb - std_hyb, avg_hyb + std_hyb, alpha=0.3)
+
+        x_synth, avg_synth, std_synth = moving_avg_std(hyb_synth_loss_hist, window=window)
+        ax_loss.plot(x_synth, avg_synth, label="HYCO Synthetic Error", linestyle="-.")
+        ax_loss.fill_between(x_synth, avg_synth - std_synth, avg_synth + std_synth, alpha=0.3)
+
+        # set yrange to not be too far from the average
+        avg_min = min(avg_phys.min(), avg_pinn.min(), avg_hyb.min(), avg_synth.min())
+        avg_max = max(avg_phys.max(), avg_pinn.max(), avg_hyb.max(), avg_synth.max())
+        ax_loss.set_ylim(avg_min * 0.8, avg_max * 1.4)
+    
+
+        ax_loss.set_yscale("log")
+        ax_loss.set_title("Mean Squared Error History", fontsize=16)
+        ax_loss.set_xlabel("Epoch", fontsize=16)
+        ax_loss.set_ylabel("Mean Squared Error", fontsize=16)
+        ax_loss.legend(fontsize=12)
+
+        # Add column labels (above the grid).
+        # The grid spans from left=0.07 to right=0.93 (width = 0.86). We split this into 4 columns.
+        col_centers = [0.07 + 0.81 * (i + 0.5) / 4 for i in range(4)]
+        for label, x_pos in zip(["FEM", "PINN", "HYCO", "True"], col_centers):
+            fig.text(x_pos, 0.96, label, ha="center", va="center", fontsize=18)
+
+        # Add row labels on the left (at fixed positions).
+        fig.text(0.04, 0.86, r"$\kappa$", ha="center", va="center", fontsize=22)
+        fig.text(0.04, 0.69, r"$\eta$", ha="center", va="center", fontsize=22)
+        fig.text(0.04, 0.525, r"$u$", ha="center", va="center", fontsize=22)
+
+        
+
 
     plt.savefig(filename)
     plt.close(fig)
