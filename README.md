@@ -116,4 +116,4 @@ This repository hosts a series of experiments on hybrid modelling of Poisson and
 
 ### Poisson 1: 
 
-![Poisson 1 Final Result](src/results/experiment_1/prediction_comparison.png)
+![Poisson 1 Final Result](src/results/poisson_1/prediction_comparison.png)
