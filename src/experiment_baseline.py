@@ -391,32 +391,32 @@ if __name__ == "__main__":
         u_fem = jnp.array(u_fem)
         u_pinn = jnp.array(u_pinn)
         
-        
 
         # Save the results.
-        jnp.save("src/files/experiment_baseline/hybrid_loss_phys.npy", loss_history_hyb_phys)
-        jnp.save("src/files/experiment_baseline/hybrid_loss_syn.npy", loss_history_hyb_syn)
-        jnp.save("src/files/experiment_baseline/hybrid_params.npy", param_history_hyb)
-        jnp.save("src/files/experiment_baseline/fem_loss.npy", loss_history_fem)
-        jnp.save("src/files/experiment_baseline/fem_params.npy", param_history_fem)
-        jnp.save("src/files/experiment_baseline/pinn_loss.npy", loss_history_pinn)
-        jnp.save("src/files/experiment_baseline/pinn_params.npy", param_history_pinn)
-        jnp.save("src/files/experiment_baseline/hybrid_u_phys.npy", u_hyb_phys)
-        jnp.save("src/files/experiment_baseline/hybrid_u_syn.npy", u_hyb_syn)
-        jnp.save("src/files/experiment_baseline/fem_u.npy", u_fem)
-        jnp.save("src/files/experiment_baseline/pinn_u.npy", u_pinn)
+        jnp.save("src/files/experiment_baseline/hybrid_loss_phys_new.npy", loss_history_hyb_phys)
+        jnp.save("src/files/experiment_baseline/hybrid_loss_syn_new.npy", loss_history_hyb_syn)
+        jnp.save("src/files/experiment_baseline/hybrid_params_new.npy", param_history_hyb)
+        jnp.save("src/files/experiment_baseline/fem_loss_new.npy", loss_history_fem)
+        jnp.save("src/files/experiment_baseline/fem_params_new.npy", param_history_fem)
+        jnp.save("src/files/experiment_baseline/pinn_loss_new.npy", loss_history_pinn)
+        jnp.save("src/files/experiment_baseline/pinn_params_new.npy", param_history_pinn)
+        jnp.save("src/files/experiment_baseline/u_hyb_phys_new.npy", u_hyb_phys)
+        jnp.save("src/files/experiment_baseline/u_hyb_syn_new.npy", u_hyb_syn)
+        jnp.save("src/files/experiment_baseline/u_fem_new.npy", u_fem)
+        jnp.save("src/files/experiment_baseline/u_pinn_new.npy", u_pinn)
+
     else:
-        loss_history_hyb_phys = np.load("src/files/experiment_baseline/hybrid_loss_phys.npy")
-        loss_history_hyb_syn = np.load("src/files/experiment_baseline/hybrid_loss_syn.npy")
-        loss_history_fem = np.load("src/files/experiment_baseline/fem_loss.npy")
-        loss_history_pinn = np.load("src/files/experiment_baseline/pinn_loss.npy")
-        param_history_hyb = np.load("src/files/experiment_baseline/hybrid_params.npy")
-        param_history_fem = np.load("src/files/experiment_baseline/fem_params.npy")
-        param_history_pinn = np.load("src/files/experiment_baseline/pinn_params.npy")
-        u_hyb_phys = np.load("src/files/experiment_baseline/hybrid_u_phys.npy")
-        u_hyb_syn = np.load("src/files/experiment_baseline/hybrid_u_syn.npy")
-        u_fem = np.load("src/files/experiment_baseline/fem_u.npy")
-        u_pinn = np.load("src/files/experiment_baseline/pinn_u.npy")
+        loss_history_hyb_phys = np.load("src/files/experiment_baseline/hybrid_loss_phys_new.npy")
+        loss_history_hyb_syn = np.load("src/files/experiment_baseline/hybrid_loss_syn_new.npy")
+        loss_history_fem = np.load("src/files/experiment_baseline/fem_loss_new.npy")
+        loss_history_pinn = np.load("src/files/experiment_baseline/pinn_loss_new.npy")
+        param_history_hyb = np.load("src/files/experiment_baseline/hybrid_params_new.npy")
+        param_history_fem = np.load("src/files/experiment_baseline/fem_params_new.npy")
+        param_history_pinn = np.load("src/files/experiment_baseline/pinn_params_new.npy")
+        u_hyb_phys = np.load("src/files/experiment_baseline/u_hyb_phys_new.npy")
+        u_hyb_syn = np.load("src/files/experiment_baseline/u_hyb_syn_new.npy")
+        u_fem = np.load("src/files/experiment_baseline/u_fem_new.npy")
+        u_pinn = np.load("src/files/experiment_baseline/u_pinn_new.npy")
 
     def replace_zeros_linear(arr):
         """
@@ -429,11 +429,34 @@ if __name__ == "__main__":
             return arr
         # np.interp will extrapolate constant for points outside interpolation range.
         return np.interp(indices, indices[mask], arr[mask])
+    def replace_zeros_nearest(arr):
+        """
+        Replace zeros in a nD numpy array with the nearest nonzero value in axis 0.
+        """
+        # Get the indices of nonzero elements.
+        nonzero_indices = np.nonzero(arr)[0]
+        # If no nonzero values exist, return array as is.
+        if len(nonzero_indices) == 0:
+            return arr
+        # Get the indices of zero elements.
+        zero_indices = np.where(arr == 0)[0]
+        # Create a copy of the array to modify.
+        arr_copy = arr.copy()
+        # Replace zeros with the nearest nonzero value.
+        for zero_index in zero_indices:
+            # Find the nearest nonzero index.
+            nearest_index = nonzero_indices[np.abs(nonzero_indices - zero_index).argmin()]
+            arr_copy[zero_index] = arr[nearest_index]
+        return arr_copy
     
     loss_history_hyb_phys = replace_zeros_linear(loss_history_hyb_phys)
     loss_history_hyb_syn = replace_zeros_linear(loss_history_hyb_syn)
     loss_history_fem = replace_zeros_linear(loss_history_fem)
     loss_history_pinn = replace_zeros_linear(loss_history_pinn)
+    param_history_hyb = replace_zeros_nearest(param_history_hyb)
+    param_history_fem = replace_zeros_nearest(param_history_fem)
+    param_history_pinn = replace_zeros_nearest(param_history_pinn)
+
     # Plot the results.
     plot(
     param_history_fem,
@@ -454,7 +477,7 @@ if __name__ == "__main__":
     u_fem=u_fem,
     u_pinn=u_pinn,
     u_true=u_true(xx_eval, yy_eval, L).reshape(-1, 1),
-    filename="experiment_baseline/experiment_baseline"
+    filename="experiment_baseline/experiment_baseline_new"
     )
 
     animate(
@@ -470,7 +493,8 @@ if __name__ == "__main__":
     pts_train,
     domain=(-pi, pi),
     N=100,
-    filename="experiment_baseline/experiment_baseline"
+    hyb_synth_loss_hist=loss_history_hyb_syn,
+    filename="experiment_baseline/experiment_baseline_new"
     )
 
 

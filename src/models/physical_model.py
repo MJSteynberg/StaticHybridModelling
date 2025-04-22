@@ -19,16 +19,18 @@ class PhysicalModel(nnx.Module):
         self.forcing_func = forcing_func
         self.kappa_func = kappa_func
         self.eta_func = eta_func
+        self.Mh_flag = False if eta_func is None else True
         self.mesh = self._create_mesh()
         self.fem = self._assemble_fem(self.mesh)
-        self.solution = self._solve_pde(self.mesh, self.fem)
+        self.solution = self._solve_pde(self.mesh, self.fem, self.Mh_flag)
         self.changed = False
         self.training = training
+        
 
     def __call__(self, x: float, y: float) -> float:
         
         self.fem = self._assemble_fem(self.mesh)
-        self.solution = self._solve_pde(self.mesh, self.fem)
+        self.solution = self._solve_pde(self.mesh, self.fem, self.Mh_flag)
         self.changed = False
         pts = jnp.array([x, y]).reshape(1, 2)
         # Create the interpolator on the fly so that no non‑array object is stored.
@@ -74,7 +76,7 @@ class PhysicalModel(nnx.Module):
         
         K = assemble_stiffness_matrix_2d(self.domain, self.N, kappa=self.kappa)
         K_in = K[jnp.ix_(interior_indices, interior_indices)]
-        F = assemble_load_vector_2d(self.domain, self.N, self.forcing_func)
+        F = assemble_load_vector_2d(self.domain, self.N, self.f_func)
         F_in = F[jnp.ix_(interior_indices)]
         
         return {
@@ -83,7 +85,7 @@ class PhysicalModel(nnx.Module):
             "F_in": nnx.Variable(F_in),
         }
     
-    def _solve_pde(self, mesh: dict, fem: dict) -> jnp.ndarray:
+    def _solve_pde(self, mesh: dict, fem: dict, flag: bool) -> jnp.ndarray:
         """
         Solve the PDE using the cached FEM matrices.
         """
@@ -92,22 +94,24 @@ class PhysicalModel(nnx.Module):
         K_in = fem["K_in"].value
         M_in = fem["M_in"].value
         F_in = fem["F_in"].value
+        if flag:
+            @jax.jit
+            def solve_inner(K_in, M_in, F_in, nodes, interior_indices, flag):
+                u_in = jsp.linalg.solve(K_in + M_in, F_in)
+                u = jnp.zeros(nodes.shape[0], dtype=jnp.float32)
+                u = u.at[interior_indices].set(u_in)
+                return u
+        else: 
+            @jax.jit
+            def solve_inner(K_in, M_in, F_in, nodes, interior_indices, flag):
+                u_in = jsp.linalg.solve(K_in, F_in)
+                u = jnp.zeros(nodes.shape[0], dtype=jnp.float32)
 
-        @jax.jit
-        def solve_inner(K_in, M_in, F_in, nodes, interior_indices):
-            u_in = jax.lax.cond(
-                M_in is not None,
-                lambda: jsp.linalg.solve(K_in + M_in, F_in),
-                lambda: jsp.linalg.solve(K_in, F_in),
-            )
+                u = u.at[interior_indices].set(u_in)
+                return u
 
 
-            u = jnp.zeros(nodes.shape[0], dtype=jnp.float32)
-
-            u = u.at[interior_indices].set(u_in)
-            return u
-
-        return nnx.Variable(solve_inner(K_in, M_in, F_in, nodes, interior_indices))
+        return nnx.Variable(solve_inner(K_in, M_in, F_in, nodes, interior_indices, flag))
     
     def kappa(self, x, y):
         """
@@ -127,6 +131,16 @@ class PhysicalModel(nnx.Module):
         if self.eta_func is not None:
             return self.eta_func(self.parameters, x, y)
         return 0.0
+    
+    def f_func(self, x, y):
+        """
+        Compute the forcing function at position (x,y) based on model parameters.
+        If no function is provided, default to 0.0.
+        """
+        try:
+            return self.forcing_func(self.parameters, x, y)
+        except:
+            return self.forcing_func(x, y)
         
 
 

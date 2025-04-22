@@ -2,10 +2,12 @@ import os
 import sys
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import matplotlib.pyplot as plt
 from functools import partial
 from flax import nnx
+import orbax.checkpoint as ocp
 import optimistix
 
 # Set working directory to the src folder.
@@ -49,22 +51,21 @@ def f(x, y):
 
 
 
-subdomain=[(-3.0, 3.0), (-3.0, 3.0)]
-n_train=100
+subdomain=[(-3, 3), (-3, 3)]
+n_train=50
 rng_x, rng_y = jax.random.split(jax.random.PRNGKey(0))
 xx_train = jax.random.uniform(rng_x, shape=(n_train,), minval=subdomain[0][0], maxval=subdomain[0][1])
 yy_train = jax.random.uniform(rng_y, shape=(n_train,), minval=subdomain[1][0], maxval=subdomain[1][1])
 pts_train = jnp.stack([xx_train, yy_train], axis=-1)
 # Use vmap over the new scalar __call__ for prediction.
 u_train = u_true(xx_train, yy_train, L).reshape(-1, 1)
-u_train += jax.random.normal(jax.random.PRNGKey(0), shape=u_train.shape) * 0.1 * jnp.std(u_train)
 print(f"Training data generated with shape: {u_train.shape}")
 
 def train_hybrid(epochs):
     # -------------------------------------------------------------------------
     # Initialize the synthetic model.
     synthetic_model = ResNetSynthetic(
-        hidden_dims=(256,256), 
+        hidden_dims=(512, 512, 512, 512), 
         activation=nnx.relu, 
         output_dim=1, 
         rngs=nnx.Rngs(0)
@@ -139,7 +140,7 @@ def train_hybrid(epochs):
     loss_history = []
     param_history = []
     rng = jax.random.PRNGKey(42)
-    n_collocation = 20
+    n_collocation = 50
     loss_syn_data = 1
     for epoch in range(epochs):
         if loss_syn_data > 1e-1:
@@ -167,257 +168,127 @@ def train_hybrid(epochs):
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}, Loss (physical): {loss_phy_data}, Loss (synthetic): {loss_syn}, Parameters: {physical_model.parameters.value}")
 
-    return loss_history, param_history
+    
+    return loss_history, param_history, synthetic_model
 
-def train_fem(epochs):
-    # -------------------------------------------------------------------------
-    # Setup physical model.
-    low_res_N = 20
-    rng1, rng2, rng3 = jax.random.split(jax.random.PRNGKey(0), 3)
-    amplitudes = jax.random.uniform(rng1, shape=(2,), minval=1, maxval=3)
-    centers_x = jax.random.uniform(rng2, shape=(2,), minval=-1, maxval=1)
-    centers_y = jax.random.uniform(rng3, shape=(2,), minval=-1, maxval=1)
-    init_params = nnx.Param(jnp.array([
-        amplitudes[0], centers_x[0], centers_y[0],
-        amplitudes[1], centers_x[1], centers_y[1]
-    ]))
-    physical_model = PhysicalModel(
+
+
+if __name__ == "__main__":
+    epochs = 3000
+    checkpointer = ocp.StandardCheckpointer()
+    if input("Train the hybrid model? (y/n): ") == "y":
+        loss_history_hyb, param_history_hyb, syn_model = train_hybrid(epochs)
+
+        # convert them to njp arrays
+        loss_history_hyb = jnp.array(loss_history_hyb)
+        param_history_hyb = jnp.array(param_history_hyb)
+
+        jnp.save("src/files/experiment_2/loss_history_hyb.npy", loss_history_hyb)
+        jnp.save("src/files/experiment_2/param_history_hyb.npy", param_history_hyb)
+        # save the model
+        _, state = nnx.split(syn_model)
+        
+        checkpoint_path = os.path.abspath("src/files/experiment_2/checkpoint")
+        ckpt_dir = ocp.test_utils.erase_and_create_empty(checkpoint_path)
+        checkpointer.save(ckpt_dir / 'state', state)
+    else:
+        loss_history_hyb = jnp.load("src/files/experiment_2/loss_history_hyb.npy")
+        param_history_hyb = jnp.load("src/files/experiment_2/param_history_hyb.npy")
+        model = ResNetSynthetic(
+            hidden_dims=(512, 512, 512, 512),
+            activation=nnx.relu,
+            output_dim=1,
+            rngs=nnx.Rngs(0)
+        )
+        
+        graphdef, state = nnx.split(model)
+        checkpoint_path = os.path.abspath("src/files/experiment_2/checkpoint")
+        state_restored = checkpointer.restore(checkpoint_path + '/state', state)
+        syn_model = nnx.merge(graphdef, state_restored)
+
+    def vmapped_model(m, xs, ys):
+        return jax.vmap(lambda xx, yy: m(xx, yy))(xs, ys)
+    
+    phys_model = PhysicalModel(
         domain=domain,
-        N=low_res_N,
-        parameters=init_params,
-        training=True,
+        N=100,
+        parameters=nnx.Param(true_params),
+        training=False,
         forcing_func=f,
         kappa_func=kappa,
         eta_func=eta,
         rngs=nnx.Rngs(0)
     )
-    nnx.display(physical_model)
-    # -------------------------------------------------------------------------
-    # Initialize the optimizer.
-    phys_opt = nnx.Optimizer(physical_model, optax.adam(5e-3))
-
-    def vmapped_model(m, xs, ys):
-        return jax.vmap(lambda xx, yy: m(xx, yy))(xs, ys)
-
-    @nnx.jit
-    def train_step(model, optimizer, x, y, u):
-        def loss_data(m):
-            u_pred = vmapped_model(m, x, y)
-            return jnp.mean(optax.squared_error(u_pred, u))
-        
-        def loss_fn(m):
-            return  loss_data(m)
-        
-        loss, grads = nnx.value_and_grad(loss_fn)(model)
-        optimizer.update(grads)  # In-place update.
-        return loss   
-
-    # -------------------------------------------------------------------------
-    # Train the physical model.
-    loss_history = []
-    param_history = []
-    for epoch in range(epochs):
-        loss_phy = train_step(physical_model, phys_opt, xx_train, yy_train, u_train)
-        loss_history.append(loss_phy)
-        param_history.append(physical_model.parameters.value)
-        if epoch % 100 == 0:
-            print(f"Epoch {epoch}, Loss (physical): {loss_phy}, Parameters: {physical_model.parameters.value}")
-
-    return loss_history, param_history
-
-
-def trian_pinn(epochs):
-    # Create the PINN model instance.
-    rng1, rng2, rng3 = jax.random.split(jax.random.PRNGKey(0), 3)
-    amplitudes = jax.random.uniform(rng1, shape=(2,), minval=1, maxval=3)
-    centers_x = jax.random.uniform(rng2, shape=(2,), minval=-1, maxval=1)
-    centers_y = jax.random.uniform(rng3, shape=(2,), minval=-1, maxval=1)
-    init_params = nnx.Param(jnp.array([
-        amplitudes[0], centers_x[0], centers_y[0],
-        amplitudes[1], centers_x[1], centers_y[1]
-    ]))
-    model = ResNetSynthetic(
-        hidden_dims=(256,256), 
-        activation=nnx.tanh, 
-        output_dim=1, 
-        rngs=nnx.Rngs(0)
-    )
-    pinn = PINN(domain=domain, model=model, parameters=init_params, forcing_func=f,
-                kappa_func=kappa, eta_func=eta, rngs=nnx.Rngs(0))
+    # Plot the prediction of the synthetic model, physical model and true solution
+    # Plot the prediction of the synthetic model, physical model and true solution
+    n_plot = 300
+    x_plot = jnp.linspace(-L//2, L//2, n_plot)
+    y_plot = jnp.linspace(-L//2, L//2, n_plot)
+    xx_plot, yy_plot = jnp.meshgrid(x_plot, y_plot)
+    xx_plot = xx_plot.flatten()
+    yy_plot = yy_plot.flatten()
+    u_true_plot = u_true(xx_plot, yy_plot, L)
+    u_syn_plot = vmapped_model(syn_model, xx_plot, yy_plot)
+    u_phy_plot = vmapped_model(phys_model, xx_plot, yy_plot)
+    u_true_plot = u_true_plot.reshape(n_plot, n_plot)
+    u_syn_plot = u_syn_plot.reshape(n_plot, n_plot)
+    u_phy_plot = u_phy_plot.reshape(n_plot, n_plot)
     
-    tx = optax.multi_transform(
-        {
-        "model": optax.adam(1e-3),
-        "parameters": optax.adam(5e-3),
-        },
-        nnx.State({
-            "model": "model",
-            "parameters": "parameters"
-        })
-    )
-    opt = nnx.Optimizer(pinn, tx)
-    
-    
-
-    # Define vmapped helper functions for the scalar calls.
-    def vmapped_model(m, xs, ys):
-        return jax.vmap(lambda xx, yy: m(xx, yy))(xs, ys)
-    
-    def vmapped_residual(m, xs, ys):
-        return jax.vmap(lambda xx, yy: m.residual(xx, yy))(xs, ys)
-    
-    @nnx.jit
-    def train_step_pinn(model, optimizer,x_i, y_i, x_b, y_b): 
-        def loss_res(m):
-            u_res = vmapped_residual(m, x_i, y_i)
-            u_b = vmapped_model(m, x_b, y_b)
-            return optax.squared_error(u_res).mean() + 1e1*optax.squared_error(u_b).mean()
-        
-        def loss_fn(m):
-            return  loss_res(m)
-        
-        # Compute the residual loss separately.
-        
-        loss, grads = nnx.value_and_grad(loss_fn)(model)
-        
-        # If the residual loss is too high, freeze (zero) the gradients.
-        grads['parameters'] = jax.tree.map(lambda g: 0.0, grads['parameters'])
-        optimizer.update(grads)  # In-place update.
-        return loss
-
-    
-    def train_step(model, optimizer, x, y, u, x_i, y_i, x_b, y_b): 
-        def loss_data(m):
-            u_pred = vmapped_model(m, x, y)
-            return optax.squared_error(u_pred, u).mean()
-        
-        def loss_res(m):
-            u_res = vmapped_residual(m, x_i, y_i)
-            u_b = vmapped_model(m, x_b, y_b)
-            return optax.squared_error(u_res).mean() + 1e1*optax.squared_error(u_b).mean()
-        
-        def loss_fn(m):
-            return  loss_data(m) + loss_res(m)
-
-        dloss = loss_data(model)
-        loss, grads = nnx.value_and_grad(loss_fn)(model)
-
-        optimizer.update(grads)  # In-place update.
-        return loss, dloss
-
-    # Training loop.
-    loss_history = []
-    param_history = []
-
-    # Create interior (collocation) points.
-    n_interior = 400
-    n_boundary = 400
-    loss_pinn = 1
-    rng = jax.random.PRNGKey(42)
-    for epoch in range(epochs):
-        if loss_pinn > 1e-1:
-            rng, rng1= jax.random.split(rng, 2)
-            x_in, y_in, x_b, y_b = pinn.create_collocation_points(n_interior, n_boundary, rng1)
-            loss_pinn = train_step_pinn(pinn, opt, x_in, y_in, x_b, y_b)
-            if epoch % 100 == 0:
-                print(f"Epoch {epoch}, PINN Loss: {loss_pinn}")
-            
-        else: 
-            rng, rng1= jax.random.split(rng, 2)
-            x_in, y_in, x_b, y_b = pinn.create_collocation_points(n_interior, n_boundary, rng1)
-            loss_val, loss_data = train_step(pinn, opt, xx_train, yy_train, u_train,
-                                x_in, y_in, x_b, y_b)
-            loss_pinn = loss_val - loss_data    
-            loss_history.append(loss_data)
-            param_history.append(pinn.parameters.value)
-            if epoch % 100 == 0:
-                print(f"Epoch {epoch}, PINN Loss: {loss_val}, PINN Parameters: {pinn.parameters.value}")
-
-    print(f"Final PINN model parameters: {pinn.parameters}")
-    return loss_history, param_history
-
-
-if __name__ == "__main__":
-    epochs = 3000
-    if input("Run the experiment? (y/n): ") == "y":
-        
-        loss_history_pinn, param_history_pinn = trian_pinn(epochs)
-        loss_history_hyb, param_history_hyb = train_hybrid(epochs)
-        loss_history_fem, param_history_fem = train_fem(epochs)
-
-        # convert them to njp arrays
-        loss_history_hyb = jnp.array(loss_history_hyb)
-        loss_history_fem = jnp.array(loss_history_fem)
-        loss_history_pinn = jnp.array(loss_history_pinn)
-        param_history_hyb = jnp.array(param_history_hyb)
-        param_history_fem = jnp.array(param_history_fem)
-        param_history_pinn = jnp.array(param_history_pinn)
-        
-
-        # Save the results.
-        jnp.save("src/files/experiment_2/hybrid_loss.npy", loss_history_hyb)
-        jnp.save("src/files/experiment_2/hybrid_params.npy", param_history_hyb)
-        jnp.save("src/files/experiment_2/fem_loss.npy", loss_history_fem)
-        jnp.save("src/files/experiment_2/fem_params.npy", param_history_fem)
-        jnp.save("src/files/experiment_2/pinn_loss.npy", loss_history_pinn)
-        jnp.save("src/files/experiment_2/pinn_params.npy", param_history_pinn)
-    else:
-        loss_history_hyb = jnp.load("src/files/experiment_2/hybrid_loss.npy")
-        loss_history_fem = jnp.load("src/files/experiment_2/fem_loss.npy")
-        loss_history_pinn = jnp.load("src/files/experiment_2/pinn_loss.npy")
-        param_history_hyb = jnp.load("src/files/experiment_2/hybrid_params.npy")
-        param_history_fem = jnp.load("src/files/experiment_2/fem_params.npy")
-        param_history_pinn = jnp.load("src/files/experiment_2/pinn_params.npy")
-
-
-
-    # If the history is not equal to epochs, pad it at the start with the initial value
-    if len(loss_history_hyb) < epochs:
-        loss_history_hyb = jnp.pad(loss_history_hyb, (epochs - len(loss_history_hyb), 0), mode="constant", constant_values=loss_history_hyb[0])
-    if len(loss_history_fem) < epochs:
-        loss_history_fem = jnp.pad(loss_history_fem, (epochs - len(loss_history_fem), 0), mode="constant", constant_values=loss_history_fem[0])
-    if len(loss_history_pinn) < epochs:
-        loss_history_pinn = jnp.pad(loss_history_pinn, (epochs - len(loss_history_pinn), 0), mode="constant", constant_values=loss_history_pinn[0])
-    if len(param_history_hyb) < epochs:
-        param_history_hyb = jnp.pad(param_history_hyb, ((epochs - len(param_history_hyb), 0), (0, 0)), mode="edge")
-    if len(param_history_fem) < epochs:
-        param_history_fem = jnp.pad(param_history_fem, ((epochs - len(param_history_fem), 0), (0, 0)), mode="edge")
-    if len(param_history_pinn) < epochs:
-        param_history_pinn = jnp.pad(param_history_pinn, ((epochs - len(param_history_pinn), 0), (0, 0)), mode="edge")
-    
-    # Plot the results.
-    plot(
-    param_history_fem,
-    param_history_hyb,
-    param_history_pinn,      # New argument for PINN training results.
-    true_params,
-    loss_history_fem,
-    loss_history_hyb,
-    loss_history_pinn,          # New loss history for PINN.
-    kappa,
-    eta,
-    pts_train,
-    domain=(-3.0, 3.0),
-    N=100,
-    filename="experiment_2/experiment_2"
+    fig = plt.figure(figsize=(13, 2.5))
+    gs = fig.add_gridspec(
+        1, 8, 
+        width_ratios=[1, 1, 1, 0.2, 0.2, 1, 1, 0.2],
+        left=0.05, right=0.93, top=0.86, bottom=0.11,
+        wspace=0.1, hspace=0.1
     )
 
-    animate(
-    param_history_fem,
-    param_history_hyb,
-    param_history_pinn,      # New argument for PINN training results.
-    true_params,
-    loss_history_fem,
-    loss_history_hyb,
-    loss_history_pinn,          # New loss history for PINN.
-    kappa,
-    eta,
-    pts_train,
-    domain=(-3.0, 3.0),
-    N=100,
-    filename="experiment_2/experiment_2"
-    )
+    # Top row: Solution plots.
+    ax0 = fig.add_subplot(gs[0, 0])
+    ax1 = fig.add_subplot(gs[0, 1])
+    ax2 = fig.add_subplot(gs[0, 2])
+    ax_top_cb = fig.add_subplot(gs[0, 3])
 
+    # Bottom row: Error plots.
+    ax3 = fig.add_subplot(gs[0, 5])
+    ax4 = fig.add_subplot(gs[0, 6])
+
+    ax_bot_cb = fig.add_subplot(gs[0, 7])
+
+    # Remove ticks and enforce square aspect ratio on all axes.
+    for axi in [ax0, ax1, ax2, ax3, ax4]:
+        axi.set_xticks([])
+        axi.set_yticks([])
+        axi.set_aspect("equal", adjustable="box")
+
+    # Top row: Plot the solutions with consistent color scale
+    vmin_sol = min(u_true_plot.min(), u_syn_plot.min(), u_phy_plot.min())
+    vmax_sol = max(u_true_plot.max(), u_syn_plot.max(), u_phy_plot.max())
+    
+    cs0 = ax0.contourf(x_plot, y_plot, u_true_plot, cmap="viridis", levels=100, vmin=vmin_sol, vmax=vmax_sol)
+    ax0.set_title("True")
+    
+    cs1 = ax2.contourf(x_plot, y_plot, u_phy_plot, cmap="viridis", levels=100, vmin=vmin_sol, vmax=vmax_sol)
+    ax1.set_title("Physical")
+
+    cs2 = ax1.contourf(x_plot, y_plot, u_syn_plot, cmap="viridis", levels=100, vmin=vmin_sol, vmax=vmax_sol)
+    ax2.set_title("Synthetic")
+
+    # Add a colorbar for the top row.
+    cbar_top = fig.colorbar(cs0, cax=ax_top_cb, orientation="vertical", pad=0.02, ticks = [-0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75])
+
+    # Bottom row: Plot the error contours with consistent color scale
+    vmax_err = max(jnp.abs(u_syn_plot - u_true_plot).max(), jnp.abs(u_phy_plot - u_true_plot).max())
+    
+    err1 = ax3.contourf(x_plot, y_plot, jnp.abs(u_phy_plot - u_true_plot), cmap="viridis", levels=100, vmin=0, vmax=vmax_err)
+    ax3.set_title("Physical Error")
+    err2 = ax4.contourf(x_plot, y_plot, jnp.abs(u_syn_plot - u_true_plot), cmap="viridis", levels=100, vmin=0, vmax=vmax_err)
+    ax4.set_title("Synthetic Error")
+    # Add a colorbar for the bottom row.
+    cbar_bot = fig.colorbar(err2, cax=ax_bot_cb, orientation="vertical", pad=0.02, ticks = [0, 0.01, 0.02, 0.03, 0.04, 0.05])
+
+    # Add overall row labels on the left.
+
+    plt.savefig("src/results/experiment_2/prediction_comparison.png")
 
     
     
