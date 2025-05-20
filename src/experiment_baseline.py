@@ -8,6 +8,7 @@ from functools import partial
 from flax import nnx
 import optimistix
 import numpy as np
+import time
 
 # Set working directory to the src folder.
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -52,12 +53,10 @@ def f(x, y):
 
 
 subdomain=[(-3, 3), (-3, 3)]
-n_train=5
-xx_train = jnp.linspace(subdomain[0][0], subdomain[0][1], n_train)
-yy_train = jnp.linspace(subdomain[1][0], subdomain[1][1], n_train)
-xx_train, yy_train = jnp.meshgrid(xx_train, yy_train)
-xx_train = xx_train.flatten()
-yy_train = yy_train.flatten()
+key = jax.random.PRNGKey(42)
+key1, key2 = jax.random.split(key)
+xx_train = jax.random.uniform(key1, shape=(25,), minval=subdomain[0][0], maxval=subdomain[0][1])
+yy_train = jax.random.uniform(key2, shape=(25,), minval=subdomain[1][0], maxval=subdomain[1][1])
 pts_train = jnp.stack([xx_train, yy_train], axis=-1)
 
 xx_eval = jnp.linspace(subdomain[0][0], subdomain[0][1], 50)
@@ -74,7 +73,7 @@ def train_hybrid(epochs):
     # -------------------------------------------------------------------------
     # Initialize the synthetic model.
     synthetic_model = ResNetSynthetic(
-        hidden_dims=(128,128), 
+        hidden_dims=(256, 256), 
         activation=nnx.relu, 
         output_dim=1, 
         rngs=nnx.Rngs(0)
@@ -113,7 +112,7 @@ def train_hybrid(epochs):
         return jax.vmap(lambda xx, yy: m(xx, yy))(xs, ys)
 
     @nnx.jit
-    def train_step_hyb(model, model_other, optimizer, x, y, u, x_collocation, y_collocation):
+    def train_step_hyb(model, model_other, optimizer, x, y, u, x_collocation, y_collocation, ld=1, lm=1):
         def loss_data(m):
             u_pred = vmapped_model(m, x, y)
             return jnp.mean(optax.squared_error(u_pred, u))
@@ -124,7 +123,7 @@ def train_hybrid(epochs):
             return jnp.mean(optax.squared_error(u_pred, u_pred_other))
         
         def loss_fn(m):
-            return  loss_data(m) + loss_hyb(m)
+            return  ld * loss_data(m) + lm * loss_hyb(m)
 
         dloss = loss_data(model)
         loss, grads = nnx.value_and_grad(loss_fn)(model)
@@ -152,9 +151,24 @@ def train_hybrid(epochs):
     loss_history_syn = np.zeros(epochs)
     param_history = np.zeros((epochs, 6))
     rng = jax.random.PRNGKey(6)
-    n_collocation = 20
+    n_collocation = 200
     loss_syn_data = 1
+    params_phys = nnx.state(physical_model, nnx.Param)
+    total_params_phys  = sum(np.prod(x.shape) for x in jax.tree_util.tree_leaves(params_phys))
+    params_syn = nnx.state(synthetic_model, nnx.Param)
+    total_params_syn  = sum(np.prod(x.shape) for x in jax.tree_util.tree_leaves(params_syn))
+    print(f"Total parameters in PINN model: {total_params_phys + total_params_syn}")
+    ld_syn = 1
+    lm_syn = 1
+    ld_phy = 1e1
+    lm_phy = 1e-1
+    start = time.time()
     for epoch in range(epochs):
+        if epoch == 1500:
+            n_collocation = 800
+            ld_phy = 1e2
+            lm_phy = 1e-2
+            syn_opt = nnx.Optimizer(synthetic_model, optax.adam(1e-4))
         if loss_syn_data > 1e-1:
             loss_syn_data = train_step(synthetic_model, syn_opt, xx_train, yy_train, u_train)
             if epoch % 100 == 0:
@@ -170,11 +184,11 @@ def train_hybrid(epochs):
             
             loss_syn, loss_syn_data = train_step_hyb(synthetic_model, physical_model, syn_opt,
                                     xx_train, yy_train, u_train,
-                                    x_collocation, y_collocation)
-            
+                                    x_collocation, y_collocation, ld=ld_syn, lm=lm_syn)
+
             loss_phy, loss_phy_data = train_step_hyb(physical_model, synthetic_model, phys_opt,
                                 xx_train, yy_train, u_train,
-                                x_collocation, y_collocation)
+                                x_collocation, y_collocation, ld=ld_phy, lm=lm_phy)
             
             # Evaluation
             
@@ -188,7 +202,8 @@ def train_hybrid(epochs):
             
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}, Loss (physical): {loss_phy_data}, Loss (synthetic): {loss_syn}, Parameters: {physical_model.parameters.value}")
-
+    end = time.time()
+    print(f"Training time: {end - start:.3f} seconds")
     return loss_history_phys, loss_history_syn, param_history, u_pred_phys, u_pred_syn
 
 def train_fem(epochs):
@@ -240,6 +255,10 @@ def train_fem(epochs):
     u_real = u_true(xx_eval, yy_eval, L).reshape(-1, 1)
     loss_history = np.zeros(epochs)
     param_history = np.zeros((epochs, 6))
+    params = nnx.state(physical_model, nnx.Param)
+    total_params  = sum(np.prod(x.shape) for x in jax.tree_util.tree_leaves(params))
+    print(f"Total parameters in PINN model: {total_params}")
+    start = time.time()
     for epoch in range(epochs):
         loss_phy = train_step(physical_model, phys_opt, xx_train, yy_train, u_train)
         # Evaluation
@@ -249,11 +268,12 @@ def train_fem(epochs):
         param_history[epoch] = physical_model.parameters.value
         if epoch % 100 == 0:
             print(f"Epoch {epoch}, Loss (physical): {loss_phy}, Parameters: {physical_model.parameters.value}")
-
+    end = time.time()
+    print(f"Training time: {end - start:.3f} seconds")
     return loss_history, param_history, u_pred
 
 
-def trian_pinn(epochs):
+def train_pinn(epochs):
     # Create the PINN model instance.
     rng1, rng2, rng3 = jax.random.split(jax.random.PRNGKey(6), 3)
     amplitudes = jax.random.uniform(rng1, shape=(2,), minval=1, maxval=3)
@@ -264,7 +284,7 @@ def trian_pinn(epochs):
         amplitudes[1], centers_x[1], centers_y[1]
     ]))
     model = ResNetSynthetic(
-        hidden_dims=(128,128), 
+        hidden_dims=(256,256), 
         activation=nnx.tanh, 
         output_dim=1, 
         rngs=nnx.Rngs(0)
@@ -344,6 +364,10 @@ def trian_pinn(epochs):
     n_boundary = 400
     loss_pinn = 1
     rng = jax.random.PRNGKey(6)
+    params = nnx.state(model, nnx.Param)
+    total_params  = sum(np.prod(x.shape) for x in jax.tree_util.tree_leaves(params))
+    print(f"Total parameters in PINN model: {total_params}")
+    start = time.time()
     for epoch in range(epochs):
         if loss_pinn > 1e-1:
             rng, rng1= jax.random.split(rng, 2)
@@ -363,7 +387,8 @@ def trian_pinn(epochs):
             param_history[epoch] = pinn.parameters.value
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}, PINN Loss: {loss_val}, PINN Parameters: {pinn.parameters.value}")
-
+    end = time.time()
+    print(f"Training time: {end - start:.3f} seconds")
     print(f"Final PINN model parameters: {pinn.parameters}")
     return loss_history, param_history, u_pred
 
@@ -374,9 +399,7 @@ if __name__ == "__main__":
         
         loss_history_hyb_phys, loss_history_hyb_syn, param_history_hyb, u_hyb_phys, u_hyb_syn = train_hybrid(epochs)
         loss_history_fem, param_history_fem, u_fem = train_fem(epochs)
-        loss_history_pinn, param_history_pinn, u_pinn = trian_pinn(epochs)
-        
-       
+        loss_history_pinn, param_history_pinn, u_pinn = train_pinn(epochs)
 
         # convert them to njp arrays
         loss_history_hyb_phys = jnp.array(loss_history_hyb_phys)
@@ -391,32 +414,32 @@ if __name__ == "__main__":
         u_fem = jnp.array(u_fem)
         u_pinn = jnp.array(u_pinn)
         
-        
 
         # Save the results.
-        jnp.save("src/files/experiment_baseline/hybrid_loss_phys.npy", loss_history_hyb_phys)
-        jnp.save("src/files/experiment_baseline/hybrid_loss_syn.npy", loss_history_hyb_syn)
-        jnp.save("src/files/experiment_baseline/hybrid_params.npy", param_history_hyb)
-        jnp.save("src/files/experiment_baseline/fem_loss.npy", loss_history_fem)
-        jnp.save("src/files/experiment_baseline/fem_params.npy", param_history_fem)
-        jnp.save("src/files/experiment_baseline/pinn_loss.npy", loss_history_pinn)
-        jnp.save("src/files/experiment_baseline/pinn_params.npy", param_history_pinn)
-        jnp.save("src/files/experiment_baseline/hybrid_u_phys.npy", u_hyb_phys)
-        jnp.save("src/files/experiment_baseline/hybrid_u_syn.npy", u_hyb_syn)
-        jnp.save("src/files/experiment_baseline/fem_u.npy", u_fem)
-        jnp.save("src/files/experiment_baseline/pinn_u.npy", u_pinn)
+        jnp.save("src/files/experiment_baseline/hybrid_loss_phys_new.npy", loss_history_hyb_phys)
+        jnp.save("src/files/experiment_baseline/hybrid_loss_syn_new.npy", loss_history_hyb_syn)
+        jnp.save("src/files/experiment_baseline/hybrid_params_new.npy", param_history_hyb)
+        jnp.save("src/files/experiment_baseline/fem_loss_new.npy", loss_history_fem)
+        jnp.save("src/files/experiment_baseline/fem_params_new.npy", param_history_fem)
+        jnp.save("src/files/experiment_baseline/pinn_loss_new.npy", loss_history_pinn)
+        jnp.save("src/files/experiment_baseline/pinn_params_new.npy", param_history_pinn)
+        jnp.save("src/files/experiment_baseline/u_hyb_phys_new.npy", u_hyb_phys)
+        jnp.save("src/files/experiment_baseline/u_hyb_syn_new.npy", u_hyb_syn)
+        jnp.save("src/files/experiment_baseline/u_fem_new.npy", u_fem)
+        jnp.save("src/files/experiment_baseline/u_pinn_new.npy", u_pinn)
+
     else:
-        loss_history_hyb_phys = np.load("src/files/experiment_baseline/hybrid_loss_phys.npy")
-        loss_history_hyb_syn = np.load("src/files/experiment_baseline/hybrid_loss_syn.npy")
-        loss_history_fem = np.load("src/files/experiment_baseline/fem_loss.npy")
-        loss_history_pinn = np.load("src/files/experiment_baseline/pinn_loss.npy")
-        param_history_hyb = np.load("src/files/experiment_baseline/hybrid_params.npy")
-        param_history_fem = np.load("src/files/experiment_baseline/fem_params.npy")
-        param_history_pinn = np.load("src/files/experiment_baseline/pinn_params.npy")
-        u_hyb_phys = np.load("src/files/experiment_baseline/hybrid_u_phys.npy")
-        u_hyb_syn = np.load("src/files/experiment_baseline/hybrid_u_syn.npy")
-        u_fem = np.load("src/files/experiment_baseline/fem_u.npy")
-        u_pinn = np.load("src/files/experiment_baseline/pinn_u.npy")
+        loss_history_hyb_phys = np.load("src/files/experiment_baseline/hybrid_loss_phys_new.npy")
+        loss_history_hyb_syn = np.load("src/files/experiment_baseline/hybrid_loss_syn_new.npy")
+        loss_history_fem = np.load("src/files/experiment_baseline/fem_loss_new.npy")
+        loss_history_pinn = np.load("src/files/experiment_baseline/pinn_loss_new.npy")
+        param_history_hyb = np.load("src/files/experiment_baseline/hybrid_params_new.npy")
+        param_history_fem = np.load("src/files/experiment_baseline/fem_params_new.npy")
+        param_history_pinn = np.load("src/files/experiment_baseline/pinn_params_new.npy")
+        u_hyb_phys = np.load("src/files/experiment_baseline/u_hyb_phys_new.npy")
+        u_hyb_syn = np.load("src/files/experiment_baseline/u_hyb_syn_new.npy")
+        u_fem = np.load("src/files/experiment_baseline/u_fem_new.npy")
+        u_pinn = np.load("src/files/experiment_baseline/u_pinn_new.npy")
 
     def replace_zeros_linear(arr):
         """
@@ -429,11 +452,34 @@ if __name__ == "__main__":
             return arr
         # np.interp will extrapolate constant for points outside interpolation range.
         return np.interp(indices, indices[mask], arr[mask])
+    def replace_zeros_nearest(arr):
+        """
+        Replace zeros in a nD numpy array with the nearest nonzero value in axis 0.
+        """
+        # Get the indices of nonzero elements.
+        nonzero_indices = np.nonzero(arr)[0]
+        # If no nonzero values exist, return array as is.
+        if len(nonzero_indices) == 0:
+            return arr
+        # Get the indices of zero elements.
+        zero_indices = np.where(arr == 0)[0]
+        # Create a copy of the array to modify.
+        arr_copy = arr.copy()
+        # Replace zeros with the nearest nonzero value.
+        for zero_index in zero_indices:
+            # Find the nearest nonzero index.
+            nearest_index = nonzero_indices[np.abs(nonzero_indices - zero_index).argmin()]
+            arr_copy[zero_index] = arr[nearest_index]
+        return arr_copy
     
     loss_history_hyb_phys = replace_zeros_linear(loss_history_hyb_phys)
     loss_history_hyb_syn = replace_zeros_linear(loss_history_hyb_syn)
     loss_history_fem = replace_zeros_linear(loss_history_fem)
     loss_history_pinn = replace_zeros_linear(loss_history_pinn)
+    param_history_hyb = replace_zeros_nearest(param_history_hyb)
+    param_history_fem = replace_zeros_nearest(param_history_fem)
+    param_history_pinn = replace_zeros_nearest(param_history_pinn)
+
     # Plot the results.
     plot(
     param_history_fem,
@@ -454,7 +500,7 @@ if __name__ == "__main__":
     u_fem=u_fem,
     u_pinn=u_pinn,
     u_true=u_true(xx_eval, yy_eval, L).reshape(-1, 1),
-    filename="experiment_baseline/experiment_baseline"
+    filename="experiment_baseline/experiment_baseline_new"
     )
 
     animate(
@@ -470,7 +516,8 @@ if __name__ == "__main__":
     pts_train,
     domain=(-pi, pi),
     N=100,
-    filename="experiment_baseline/experiment_baseline"
+    hyb_synth_loss_hist=loss_history_hyb_syn,
+    filename="experiment_baseline/experiment_baseline_new"
     )
 
 

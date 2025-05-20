@@ -41,8 +41,8 @@ def u_true(x, y, L):
 # -----------------------------------------------------------------------------  
 # Generate the “true solution” using a high resolution physical model.
 true_params = jnp.array([
-    3.5, -1.0, -1.0,   # kappa parameters
-    1.5, 2.0, 1.0       # eta parameters
+    4, -1.0, -1.0,   # kappa parameters
+    1, 2.0, 1.0       # eta parameters
 ])
 L = 6
 domain = (-L//2, L//2)
@@ -52,10 +52,10 @@ def f(x, y):
 
 
 subdomain=[(-3, 3), (-3, 3)]
-n_train=50
-rng_x, rng_y = jax.random.split(jax.random.PRNGKey(0))
-xx_train = jax.random.uniform(rng_x, shape=(n_train,), minval=subdomain[0][0], maxval=subdomain[0][1])
-yy_train = jax.random.uniform(rng_y, shape=(n_train,), minval=subdomain[1][0], maxval=subdomain[1][1])
+key = jax.random.PRNGKey(42)
+key1, key2 = jax.random.split(key)
+xx_train = jax.random.uniform(key1, shape=(25,), minval=subdomain[0][0], maxval=subdomain[0][1])
+yy_train = jax.random.uniform(key2, shape=(25,), minval=subdomain[1][0], maxval=subdomain[1][1])
 pts_train = jnp.stack([xx_train, yy_train], axis=-1)
 # Use vmap over the new scalar __call__ for prediction.
 u_train = u_true(xx_train, yy_train, L).reshape(-1, 1)
@@ -65,7 +65,7 @@ def train_hybrid(epochs):
     # -------------------------------------------------------------------------
     # Initialize the synthetic model.
     synthetic_model = ResNetSynthetic(
-        hidden_dims=(512, 512, 512, 512), 
+        hidden_dims=(256,256), 
         activation=nnx.relu, 
         output_dim=1, 
         rngs=nnx.Rngs(0)
@@ -95,7 +95,7 @@ def train_hybrid(epochs):
     nnx.display(physical_model)
     # -------------------------------------------------------------------------
     # Initialize the optimizers.
-    syn_opt = nnx.Optimizer(synthetic_model, optax.adam(1e-3))
+    syn_opt = nnx.Optimizer(synthetic_model, optax.adam(1e-4))
     phys_opt = nnx.Optimizer(physical_model, optax.adam(5e-3))
 
     # Helper to vmap a scalar-call model.
@@ -103,7 +103,7 @@ def train_hybrid(epochs):
         return jax.vmap(lambda xx, yy: m(xx, yy))(xs, ys)
 
     @nnx.jit
-    def train_step_hyb(model, model_other, optimizer, x, y, u, x_collocation, y_collocation):
+    def train_step_hyb(model, model_other, optimizer, x, y, u, x_collocation, y_collocation, ld, lm):
         def loss_data(m):
             u_pred = vmapped_model(m, x, y)
             return jnp.mean(optax.squared_error(u_pred, u))
@@ -114,7 +114,7 @@ def train_hybrid(epochs):
             return jnp.mean(optax.squared_error(u_pred, u_pred_other))
         
         def loss_fn(m):
-            return  loss_data(m) + loss_hyb(m)
+            return  ld * loss_data(m) + lm * loss_hyb(m)
 
         dloss = loss_data(model)
         loss, grads = nnx.value_and_grad(loss_fn)(model)
@@ -140,29 +140,35 @@ def train_hybrid(epochs):
     loss_history = []
     param_history = []
     rng = jax.random.PRNGKey(42)
-    n_collocation = 50
+    n_collocation = 2000
     loss_syn_data = 1
+    ld_syn = 1
+    lm_syn = 1e1
+    ld_phys = 1e1
+    lm_phys = 1e-1
+    
     for epoch in range(epochs):
+
+
         if loss_syn_data > 1e-1:
             loss_syn_data = train_step(synthetic_model, syn_opt, xx_train, yy_train, u_train)
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}, Loss (synthetic): {loss_syn_data}")
 
         else:
-            rng, rng1, rng2 = jax.random.split(rng, 3)
-            x_collocation = jax.random.uniform(rng1, shape=(n_collocation,),
-                                            minval=domain[0], maxval=domain[1])
-            y_collocation = jax.random.uniform(rng2, shape=(n_collocation,),
-                                            minval=domain[0], maxval=domain[1])
+            rng, rng_x, rng_y = jax.random.split(rng, 3)
+            x_collocation = jax.random.uniform(rng_x, shape=(n_collocation,), minval=-pi, maxval=pi)
+            y_collocation = jax.random.uniform(rng_y, shape=(n_collocation,), minval=-pi, maxval=pi)
+
         
             
             loss_syn, loss_syn_data = train_step_hyb(synthetic_model, physical_model, syn_opt,
                                     xx_train, yy_train, u_train,
-                                    x_collocation, y_collocation)
+                                    x_collocation, y_collocation, ld_syn, lm_syn)
             
             loss_phy, loss_phy_data = train_step_hyb(physical_model, synthetic_model, phys_opt,
                                 xx_train, yy_train, u_train,
-                                x_collocation, y_collocation)
+                                x_collocation, y_collocation, ld_phys, lm_phys)
             loss_history.append(loss_phy_data)
             param_history.append(physical_model.parameters.value)
             if epoch % 100 == 0:
@@ -195,7 +201,7 @@ if __name__ == "__main__":
         loss_history_hyb = jnp.load("src/files/experiment_4/loss_history_hyb.npy")
         param_history_hyb = jnp.load("src/files/experiment_4/param_history_hyb.npy")
         model = ResNetSynthetic(
-            hidden_dims=(512, 512, 512, 512),
+            hidden_dims=(256, 256),
             activation=nnx.relu,
             output_dim=1,
             rngs=nnx.Rngs(0)
@@ -277,14 +283,14 @@ if __name__ == "__main__":
     cbar_top = fig.colorbar(cs0, cax=ax_top_cb, orientation="vertical", pad=0.02, ticks = [-0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75])
 
     # Bottom row: Plot the error contours with consistent color scale
-    vmax_err = max(jnp.abs(u_syn_plot - u_true_plot).max(), jnp.abs(u_phy_plot - u_true_plot).max())
+    vmax_err = 0.1
     
     err1 = ax3.contourf(x_plot, y_plot, jnp.abs(u_phy_plot - u_true_plot), cmap="viridis", levels=100, vmin=0, vmax=vmax_err)
     ax3.set_title("Physical Error")
     err2 = ax4.contourf(x_plot, y_plot, jnp.abs(u_syn_plot - u_true_plot), cmap="viridis", levels=100, vmin=0, vmax=vmax_err)
     ax4.set_title("Synthetic Error")
     # Add a colorbar for the bottom row.
-    cbar_bot = fig.colorbar(err2, cax=ax_bot_cb, orientation="vertical", pad=0.02, ticks = [0, 0.01, 0.02, 0.03, 0.04, 0.05])
+    cbar_bot = fig.colorbar(err2, cax=ax_bot_cb, orientation="vertical", pad=0.02, ticks = [0, 0.02, 0.04, 0.06, 0.08, 0.1])
 
     # Add overall row labels on the left.
 
