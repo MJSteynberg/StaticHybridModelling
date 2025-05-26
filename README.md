@@ -6,7 +6,6 @@ This repository hosts a series of experiments on hybrid modelling of a Helmholtz
 - **Physics-only Training:** Updates only the physics model parameters.
 - **PINN Training:** Combines a PDE residual loss with a supervised data loss and freezes physics updates if the PDE loss exceeds a user-defined threshold.
 
-
 ## Workspace Structure
 
 - **README.md** – This file.
@@ -109,3 +108,12 @@ This repository hosts a series of experiments on hybrid modelling of a Helmholtz
 
 ![Experiment 2 Final Result](src/results/experiment_2/experiment_2.png)
 
+
+### Getting Started
+
+# Create a venv
+pyenv virtualenv 3.12.0 hyco
+pyenv activate hyco
+
+# Use poetry to build dependencies from .toml
+poetry install

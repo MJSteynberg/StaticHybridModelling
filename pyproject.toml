@@ -1,0 +1,19 @@
+[project]
+name = "hyco"
+version = "0.1.0"
+description = "HYbridize physical and synthetic modeling by COllapsing them together."
+authors = [
+    {name = "thys.steynberg@fau.de, lorenzo.liverani@fau.de, jonas.m.witt@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jax (>=0.6.1,<0.7.0)",
+    "optax (>=0.2.4,<0.3.0)",
+    "matplotlib (>=3.10.3,<4.0.0)",
+    "flax (>=0.10.6,<0.11.0)"
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
