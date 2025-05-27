@@ -27,11 +27,11 @@ jobs:
       run: |
         poetry install --with=dev
 
-    - name: Analysing the code with black
+    - name: Analyze the code with black
       run: |
         poetry run black $(git ls-files '*.py')
 
-    - name: Analysing the code with pylint
+    - name: Analyze the code with pylint
       run: |
         poetry run pylint $(git ls-files '*.py')
     

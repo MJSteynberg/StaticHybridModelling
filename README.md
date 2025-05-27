@@ -111,9 +111,33 @@ This repository hosts a series of experiments on hybrid modelling of a Helmholtz
 
 ### Getting Started
 
-# Create a venv
+Create a virtual environment
+````
 pyenv virtualenv 3.12.0 hyco
 pyenv activate hyco
+````
 
-# Use poetry to build dependencies from .toml
+Use poetry to build dependencies from .toml
+````
 poetry install
+````
+
+Use pytest to check the installation
+````
+python -m pytest src/tests/*.py
+````
+
+Static code analysis (CI workflow)
+````
+- name: Analyze code with black
+      run: |
+        poetry run black $(git ls-files '*.py')
+
+    - name: Analyze code with pylint
+      run: |
+        poetry run pylint $(git ls-files '*.py')
+    
+    - name: Run tests with pytest
+      run: |
+        poetry run pytest tests/ -v 
+````
