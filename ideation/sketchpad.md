@@ -20,6 +20,9 @@ Key features include:
 - PhysicsNeMo Symbolic: support for physics-informed model training: integrating symbolic PDEs, computing PDE-based residuals, domain sampling
 - Built on PyTorch (should think about switching from JAX to PyTorch) and released under the Apache 2.0 license
 
+PyTorch:
+- Finite elements for the dynamic case missing (e.g., FEniCS)
+
 Project website: https://developer.nvidia.com/physicsnemo  
 GitHub: https://github.com/NVIDIA/physicsnemo
 
