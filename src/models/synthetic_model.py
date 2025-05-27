@@ -2,7 +2,6 @@ from flax import nnx
 import jax.numpy as jnp
 from typing import Callable, Sequence
 
-
 class SyntheticModel(nnx.Module):
     """Abstract Synthetic Model representing a function f(x, y) = u."""
     def __call__(self, x: float, y: float) -> jnp.ndarray:
@@ -45,7 +44,7 @@ class ResNetBlock(nnx.Module):
         x = self.linear(x)
         return self.activation(x + residual)
 
-class ResNetSynthetic(SyntheticModel):
+class ResNet(SyntheticModel):
     """A ResNet-style synthetic model with skip connections."""
     def __init__(self, hidden_dims: Sequence[int] = (64, 64, 64),
                  activation: Callable = nnx.relu, output_dim: int = 1, rngs: nnx.Rngs = None):
