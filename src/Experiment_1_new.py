@@ -16,7 +16,7 @@ if src_dir not in sys.path:
 os.chdir(src_dir)
 
 from models.physical_model import PhysicalModel  
-from models.synthetic_model import FeedForwardNet, ResNetSynthetic
+from models.synthetic_model import FeedForwardNet, ResNet
 from models.other_models import PINN
 from tools.plotting import *  
 
@@ -84,7 +84,7 @@ def f(x, y):
 def train_hybrid(epochs):
     # -------------------------------------------------------------------------
     # Initialize the synthetic model.
-    synthetic_model = ResNetSynthetic(
+    synthetic_model = ResNet(
         hidden_dims=(256,256), 
         activation=nnx.relu, 
         output_dim=1, 
