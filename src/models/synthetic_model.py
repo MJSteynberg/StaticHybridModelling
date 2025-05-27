@@ -7,18 +7,6 @@ class SyntheticModel(nnx.Module):
     """Abstract Synthetic Model representing a function f(x, y) = u."""
     def __call__(self, x: float, y: float) -> jnp.ndarray:
         raise NotImplementedError("Subclasses should implement __call__")
-   
-class ResNetBlock(nnx.Module):
-    def __init__(self, features: int, activation: Callable, rngs: nnx.Rngs = None):
-        self.activation = activation
-        self.linear = nnx.Linear(features, features, rngs=rngs)
-    
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        residual = x
-        x = self.linear(x)
-        x = self.activation(x)
-        x = self.linear(x)
-        return self.activation(x + residual)
 
 class FeedForwardNet(SyntheticModel):
     """A simple feedforward neural network for synthetic modeling."""
@@ -34,17 +22,28 @@ class FeedForwardNet(SyntheticModel):
         self.output = nnx.Linear(hidden_dims[-1], output_dim, rngs=rngs)
 
     @nnx.jit
-    def __call__(self, x: float, y: float) -> float:
-        # Build a (1,2) input vector from scalar x and y.
-        inputs = jnp.array([x, y])
+    def __call__(self, x, y):
+        # native batch support with jnp.stack: x, y can now be scalars or arrays
+        inputs = jnp.stack([x, y], axis=-1)
         x_out = self.input(inputs)
         x_out = self.activation(x_out)
         for layer in self.hidden:
             x_out = layer(x_out)
             x_out = self.activation(x_out)
         x_out = self.output(x_out)
-        # Return the scalar output.
         return x_out
+
+class ResNetBlock(nnx.Module):
+    def __init__(self, features: int, activation: Callable, rngs: nnx.Rngs = None):
+        self.activation = activation
+        self.linear = nnx.Linear(features, features, rngs=rngs)
+    
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        residual = x
+        x = self.linear(x)
+        x = self.activation(x)
+        x = self.linear(x)
+        return self.activation(x + residual)
 
 class ResNetSynthetic(SyntheticModel):
     """A ResNet-style synthetic model with skip connections."""
@@ -62,13 +61,12 @@ class ResNetSynthetic(SyntheticModel):
 
     @nnx.jit
     def __call__(self, x: float, y: float) -> float:
-        # Build a (1,2) input vector from scalar x and y.
-        inputs = jnp.array([x, y])
+        # native batch support with jnp.stack: x, y can now be scalars or arrays
+        inputs = jnp.stack([x, y], axis=-1)
         x_out = self.input(inputs)
         x_out = self.activation(x_out)
         for layer in self.hidden:
             x_out = layer(x_out)
             x_out = self.activation(x_out)
         x_out = self.output(x_out)
-        # Return the scalar output.
         return x_out

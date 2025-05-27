@@ -1,92 +1,69 @@
-import os
-import sys
-from timeit import timeit
-
+import pytest
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
-# Ensure that the project root is on sys.path.
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(current_dir, ".."))
-if project_root not in sys.path:
-    sys.path.append(project_root)
+from models.synthetic_model import FeedForwardNet, ResNetSynthetic
 
-from models.synthetic_model import FeedForwardNet, ResNetSynthetic, SyntheticModel
+@pytest.mark.parametrize("ModelClass,hidden_dims,output_dim", [
+    (FeedForwardNet, (32, 32), 1),
+    (ResNetSynthetic, (32, 32, 32), 1),
+])
+def test_output_shape_scalar(ModelClass, hidden_dims, output_dim):
+    # Test output shape for scalar input
+    model = ModelClass(hidden_dims=hidden_dims, output_dim=output_dim, rngs=nnx.Rngs(42))
+    x, y = 0.5, 0.7
+    output = model(x, y)
+    assert output.shape == (output_dim,) or output.ndim == 1
 
-
-def test_feedforward_net_output_shape():
-    # Create dummy inputs
+@pytest.mark.parametrize("ModelClass,hidden_dims,output_dim", [
+    (FeedForwardNet, (32, 32), 1),
+    (ResNetSynthetic, (32, 32, 32), 1),
+])
+def test_output_shape_batched(ModelClass, hidden_dims, output_dim):
+    # Test output shape for batched input
     batch_size = 10
+    model = ModelClass(hidden_dims=hidden_dims, output_dim=output_dim, rngs=nnx.Rngs(42))
     x = jnp.linspace(0, 1, batch_size)
     y = jnp.linspace(1, 2, batch_size)
-    
-    # Initialize the model with NNX
-    model = FeedForwardNet(hidden_dims=(32, 32), output_dim=1, rngs=nnx.Rngs(42))
-    
-    # Apply the model with vmap to handle batch dimension
-    outputs = jax.vmap(model)(x, y)
-    
-    # Assert that outputs shape equals batch_size
-    assert outputs.shape == (batch_size,1), f"Expected ({batch_size},1) but got {outputs.shape}"
+    outputs = model(x, y)
+    assert outputs.shape == (batch_size, output_dim)
 
-def test_resnet_synthetic_output_shape():
-    # Create dummy inputs
-    batch_size = 10
-    x = jnp.linspace(0, 1, batch_size)
-    y = jnp.linspace(1, 2, batch_size)
-    
-    # Initialize the ResNet synthetic model with NNX
-    model = ResNetSynthetic(hidden_dims=(32, 32, 32), output_dim=1, rngs=nnx.Rngs(0))
-    
-    # Apply the model with vmap to handle batch dimension
-    outputs = jax.vmap(model)(x, y)
-    
-    # Assert that outputs shape equals batch_size
-    assert outputs.shape == (batch_size,1), f"Expected ({batch_size},1) but got {outputs.shape}"
+@pytest.mark.parametrize("ModelClass,hidden_dims,output_dim", [
+    (FeedForwardNet, (8, 8), 2),
+    (ResNetSynthetic, (16, 16, 16), 3),
+])
+def test_model_initialization(ModelClass, hidden_dims, output_dim):
+    # Test model initialization with different hidden_dims and output_dim
+    model = ModelClass(hidden_dims=hidden_dims, output_dim=output_dim, rngs=nnx.Rngs(0))
+    x, y = 0.1, 0.2
+    output = model(x, y)
+    assert output.shape[-1] == output_dim
 
-def test_model_scalar_inputs():
-    """Test that the models can handle scalar inputs (non-batched)."""
-    # Initialize models
-    ffn = FeedForwardNet(hidden_dims=(32, 32), output_dim=1, rngs=nnx.Rngs(42))
-    resnet = ResNetSynthetic(hidden_dims=(32, 32, 32), output_dim=1, rngs=nnx.Rngs(0))
-    
-    # Test with scalar inputs
+@pytest.mark.parametrize("ModelClass,hidden_dims", [
+    (FeedForwardNet, (32, 32)),
+    (ResNetSynthetic, (32, 32, 32)),
+])
+def test_error_on_wrong_input_shape(ModelClass, hidden_dims):
+    # Test that model raises an error for mismatched input shapes
+    model = ModelClass(hidden_dims=hidden_dims, output_dim=1, rngs=nnx.Rngs(0))
+    x = jnp.ones((2, 2))
+    y = jnp.ones((3, 3))  # Mismatched shape
+    with pytest.raises(Exception):
+        model(x, y)
+
+@pytest.mark.parametrize("ModelClass,hidden_dims,output_dim", [
+    (FeedForwardNet, (32, 32), 1),
+    (ResNetSynthetic, (32, 32, 32), 1),
+])
+def test_nnx_jit_compatibility(ModelClass, hidden_dims, output_dim):
+    model = ModelClass(hidden_dims=hidden_dims, output_dim=output_dim, rngs=nnx.Rngs(42))
+
+    @nnx.jit
+    def call_model(m, x, y):
+        return m(x, y)
+
     x, y = 0.5, 0.7
-    
-    # Apply models to single point
-    output_ffn = ffn(x, y)
-    output_resnet = resnet(x, y)
-    
-    # Check scalar output
-    assert output_ffn.ndim == 1, f"Expected scalar output, got shape {output_ffn.shape}"
-    assert output_resnet.ndim == 1, f"Expected scalar output, got shape {output_resnet.shape}"
+    output = call_model(model, x, y)
+    assert output.shape == (output_dim,) or output.ndim == 1
 
-def test_model_jit_compatibility():
-    """Test that the models work with JAX JIT compilation."""
-    # Initialize models
-    ffn = FeedForwardNet(hidden_dims=(32, 32), output_dim=1, rngs=nnx.Rngs(42))
-    resnet = ResNetSynthetic(hidden_dims=(32, 32, 32), output_dim=1, rngs=nnx.Rngs(0))
-    
-    # Create JIT-compiled versions
-    jitted_ffn = jax.jit(lambda x, y: ffn(x, y))
-    jitted_resnet = jax.jit(lambda x, y: resnet(x, y))
-    
-    # Test with scalar inputs
-    x, y = 0.5, 0.7
-    
-    # Apply JIT-compiled functions
-    output_ffn = jitted_ffn(x, y)
-    output_resnet = jitted_resnet(x, y)
-    
-    # Check outputs
-    assert output_ffn.ndim == 1, f"Expected scalar output, got shape {output_ffn.shape}"
-    assert output_resnet.ndim == 1, f"Expected scalar output, got shape {output_resnet.shape}"
-
-
-if __name__ == "__main__":
-    test_feedforward_net_output_shape()
-    test_resnet_synthetic_output_shape()
-    test_model_scalar_inputs()
-    test_model_jit_compatibility()
-    print("All tests passed!")
