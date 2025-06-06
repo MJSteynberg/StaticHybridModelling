@@ -22,66 +22,63 @@ from tools.plotting import *
 
 pi = jnp.pi
 
-# Define coefficient functions as Gaussians.
 def kappa(parameters, x, y): 
-    amplitude, cx, cy = parameters[0:3]
-    return amplitude * jnp.exp(-(((x - cx)**2 + (y - cy)**2))) + 1
+    # Assume parameters has shape n^2 + 1 
+    mu0 = parameters[0]
+    coeffs = parameters[1:].reshape(3, 3)
+    sin_sum = 0.0
+    for m in range(3):
+        for p in range(3):
+            sin_sum += coeffs[m, p] * jnp.sin(jnp.pi * (m + 1) * x/4) * jnp.sin(jnp.pi * (p + 1) * y/4)
+    return mu0**2 + jax.nn.softplus(sin_sum)
 
 def eta(parameters, x, y):
-    amplitude, cx, cy = parameters[3:6]
-    return (amplitude * jnp.exp(-(((x - cx)**2 + (y - cy)**2))) + 1)**2
+    return jnp.zeros_like(x)
 
 def f_full(parameters, x, y, L):
-    A, ax, ay, B, bx, by = parameters
-    return -A*(2*ax - 2*x)*jnp.exp(-(-ax + x)**2 - (-ay + y)**2)*jnp.sin(y)*jnp.cos(x) - A*(2*ay - 2*y)*jnp.exp(-(-ax + x)**2 - (-ay + y)**2)*jnp.sin(x)*jnp.cos(y) + 2*(A*jnp.exp(-(-ax + x)**2 - (-ay + y)**2) + 1)*jnp.sin(x)*jnp.sin(y) + (B*jnp.exp(-(-bx + x)**2 - (-by + y)**2) + 1)**2*jnp.sin(x)*jnp.sin(y)
+    return 1
 
-def u_true(x, y, L):
-    return jnp.sin(x)*jnp.sin(y)
+def f(x, y):
+    # This is a placeholder for the forcing function.
+    # It should be defined based on the problem requirements.
+    return f_full(true_params, x, y, L)
+
 # -----------------------------------------------------------------------------  
 # Generate the “true solution” using a high resolution physical model.
-true_params = jnp.array([
-    4, -1.0, -1.0,   # kappa parameters
-    1, 2.0, 1.0       # eta parameters
-])
-L = 2*pi
+L = 2 * pi  # Domain size.
+rng_key = jax.random.PRNGKey(5)
+true_params = jax.random.uniform(rng_key, shape=(10,), minval=-1, maxval=1)
+print(f"True parameters: {true_params}")
+true_model = PhysicalModel(
+    domain=(-L/2, L/2),
+    N=100,  # High resolution for true solution.
+    parameters=true_params,
+    training=False,
+    forcing_func=f,
+    kappa_func=kappa,
+    eta_func=eta,
+    rngs=nnx.Rngs(0)
+)
+
+# Generate a grid for evaluation.
+xx_eval = jnp.linspace(-L/2, L/2, 50)
+yy_eval = jnp.linspace(-L/2, L/2, 50)
+xx_eval, yy_eval = jnp.meshgrid(xx_eval, yy_eval)
+xx_eval = xx_eval.flatten()
+yy_eval = yy_eval.flatten()
+
+#plot kappa 
+kappa_values = jax.vmap(lambda x, y: kappa(true_params, x, y))(xx_eval, yy_eval).reshape(-1, 1)
+
+# Evaluate the true solution on the grid.
+u_true = jax.vmap(lambda x, y: true_model(x, y))(xx_eval, yy_eval).reshape(-1, 1)
+# Plot the true solution.
+
 domain = (-L/2, L/2)
 def f(x, y):
     return f_full(true_params, x, y, L)
 
-
-
-
-
-# from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-# # plot u, kappa, eta, and f with improved formatting using contourf with 100 levels
-# plt.figure(figsize=(16, 4))
-# plot_data = [
-#     (u_true(xx_eval, yy_eval, L).reshape(100, 100), r'$u$'),
-#     (kappa(true_params, xx_eval, yy_eval).reshape(100, 100), r'$\kappa$'),
-#     (np.sqrt(eta(true_params, xx_eval, yy_eval)).reshape(100, 100), r'$\eta$'),
-#     (f_full(true_params, xx_eval, yy_eval, L).reshape(100, 100), r'$f$'),
-# ]
-
-# for i, (data, label) in enumerate(plot_data, start=1):
-#     ax = plt.subplot(1, 4, i)
-#     im = ax.contourf(data, levels=100, cmap='viridis')
-#     ax.set_title(label, fontsize=18)
-#     ax.set_xticks([])
-#     ax.set_yticks([])
-#     ax.set_aspect('equal')
-#     # Create an axes on the right side of ax, make the colorbar broader.
-#     divider = make_axes_locatable(ax)
-#     cax = divider.append_axes("right", size="16%", pad=0.1)
-#     # Set the colorbar to display 5 ticks.
-#     plt.colorbar(im, cax=cax, ticks=np.linspace(int(im.get_clim()[0]), int(im.get_clim()[1]), 5))
-
-# plt.tight_layout()
-# plt.savefig("src/ground.png")
-# plt.show()
-
-
-def train_hybrid(epochs):
+def train_hybrid(epochs, weight):
     # -------------------------------------------------------------------------
     # Initialize the synthetic model.
     synthetic_model = ResNetSynthetic(
@@ -94,14 +91,9 @@ def train_hybrid(epochs):
     # -------------------------------------------------------------------------
     # Setup physical model.
     low_res_N = 18
+    
     rng1, rng2, rng3 = jax.random.split(jax.random.PRNGKey(6), 3)
-    amplitudes = jax.random.uniform(rng1, shape=(2,), minval=1, maxval=3)
-    centers_x = jax.random.uniform(rng2, shape=(2,), minval=0, maxval=1)
-    centers_y = jax.random.uniform(rng3, shape=(2,), minval=0, maxval=1)
-    init_params = nnx.Param(jnp.array([
-        amplitudes[0], centers_x[0], centers_y[0],
-        amplitudes[1], centers_x[1], centers_y[1]
-    ]))
+    init_params = nnx.Param(jax.random.uniform(rng3, shape=(10,), minval=-1, maxval=1))
     print(f"Initial parameters: {init_params}")
     physical_model = PhysicalModel(
         domain=domain,
@@ -159,24 +151,23 @@ def train_hybrid(epochs):
 
     # -------------------------------------------------------------------------
     # Train the models.
-    u_real = u_true(xx_eval, yy_eval, L).reshape(-1, 1)
+    u_real = u_true
     loss_history_phys = np.zeros(epochs)
     loss_history_syn = np.zeros(epochs)
-    param_history = np.zeros((epochs, 6))
+    param_history = np.zeros((epochs, 10))
     rng = jax.random.PRNGKey(6)
     n_collocation = 20
     loss_syn_data = 1
     loss_phy = 1
-    ld_syn = 1
+    ld_syn = weight[0]
     lm_syn = 1
-    ld_phy = 1
-    lm_phy = 1
+    ld_phy, lm_phy = weight
     for epoch in range(epochs):
         if epoch == 1500:
             n_collocation = 800
-            ld_phy = 1e2
-            lm_phy = 1e-2
-        if loss_syn_data > 1e-1:
+            ld_syn = 1e-1
+            lm_syn = 1e2
+        if loss_syn_data > 5e-1 * max(ld_syn, lm_syn):
             loss_syn_data = train_step(synthetic_model, syn_opt, xx_train, yy_train, u_train)
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}, Loss (synthetic): {loss_syn_data}")
@@ -218,13 +209,7 @@ def train_fem(epochs):
     # Setup physical model.
     low_res_N = 18
     rng1, rng2, rng3 = jax.random.split(jax.random.PRNGKey(6), 3)
-    amplitudes = jax.random.uniform(rng1, shape=(2,), minval=1, maxval=3)
-    centers_x = jax.random.uniform(rng2, shape=(2,), minval=0, maxval=1)
-    centers_y = jax.random.uniform(rng3, shape=(2,), minval=0, maxval=1)
-    init_params = nnx.Param(jnp.array([
-        amplitudes[0], centers_x[0], centers_y[0],
-        amplitudes[1], centers_x[1], centers_y[1]
-    ]))
+    init_params = nnx.Param(jax.random.uniform(rng3, shape=(10,), minval=-1, maxval=1))
     print(f"Initial parameters: {init_params}")
     physical_model = PhysicalModel(
         domain=domain,
@@ -260,9 +245,9 @@ def train_fem(epochs):
 
     # -------------------------------------------------------------------------
     # Train the physical model.
-    u_real = u_true(xx_eval, yy_eval, L).reshape(-1, 1)
+    u_real = u_true
     loss_history = np.zeros(epochs)
-    param_history = np.zeros((epochs, 6))
+    param_history = np.zeros((epochs, 10))
     for epoch in range(epochs):
         loss_phy = train_step(physical_model, phys_opt, xx_train, yy_train, u_train)
         # Evaluation
@@ -279,16 +264,10 @@ def train_fem(epochs):
 def train_pinn(epochs):
     # Create the PINN model instance.
     rng1, rng2, rng3 = jax.random.split(jax.random.PRNGKey(6), 3)
-    amplitudes = jax.random.uniform(rng1, shape=(2,), minval=1, maxval=3)
-    centers_x = jax.random.uniform(rng2, shape=(2,), minval=0, maxval=1)
-    centers_y = jax.random.uniform(rng3, shape=(2,), minval=0, maxval=1)
-    init_params = nnx.Param(jnp.array([
-        amplitudes[0], centers_x[0], centers_y[0],
-        amplitudes[1], centers_x[1], centers_y[1]
-    ]))
+    init_params = nnx.Param(jax.random.uniform(rng3, shape=(10,), minval=-1, maxval=1))
     print(f"Initial parameters: {init_params}")
     model = ResNetSynthetic(
-        hidden_dims=(256,256), 
+        hidden_dims=(256, 256), 
         activation=nnx.tanh, 
         output_dim=1, 
         rngs=nnx.Rngs(0)
@@ -360,16 +339,16 @@ def train_pinn(epochs):
 
     # Training loop.
     loss_history = np.zeros(epochs)
-    param_history = np.zeros((epochs, 6))
+    param_history = np.zeros((epochs, 10))
 
     # Create interior (collocation) points.
-    u_real = u_true(xx_eval, yy_eval, L).reshape(-1, 1)
+    u_real = u_true
     n_interior = 400
     n_boundary = 400
     loss_pinn = 1
     rng = jax.random.PRNGKey(6)
     for epoch in range(epochs):
-        if loss_pinn > 1e-1:
+        if loss_pinn > 1:
             rng, rng1= jax.random.split(rng, 2)
             x_in, y_in, x_b, y_b = pinn.create_collocation_points(n_interior, n_boundary, rng1)
             loss_pinn = train_step_pinn(pinn, opt, x_in, y_in, x_b, y_b)
@@ -394,134 +373,143 @@ def train_pinn(epochs):
 
 
 if __name__ == "__main__":
-    for i in [50]:
-        epochs = 3000
+        errors = [0.25]
+        weights = [(0.8, 1.2)]
+        for error, weight in zip(errors, weights):
+            epochs = 3000
+            n_train=50
+            subdomain = ((-pi, pi), (-pi, pi))  # Define the subdomain for training.
+            rng_x, rng_y = jax.random.split(jax.random.PRNGKey(6))
+            xx_train = jax.random.uniform(rng_x, shape=(n_train,), minval=subdomain[0][0], maxval=subdomain[0][1])
+            yy_train = jax.random.uniform(rng_y, shape=(n_train,), minval=subdomain[1][0], maxval=subdomain[1][1])
+            pts_train = jnp.stack([xx_train, yy_train], axis=-1)
 
-        if i == 50:
-             subdomain=[(0, pi), (0, pi)]
-        elif i == 75:
-            subdomain=[(-pi/2, pi), (-pi/2, pi)]
-        elif i == 100:
-            subdomain=[(-pi, pi), (-pi, pi)]
-
-        n_train=25
-        rng_x, rng_y = jax.random.split(jax.random.PRNGKey(6))
-        xx_train = jax.random.uniform(rng_x, shape=(n_train,), minval=subdomain[0][0], maxval=subdomain[0][1])
-        yy_train = jax.random.uniform(rng_y, shape=(n_train,), minval=subdomain[1][0], maxval=subdomain[1][1])
-        pts_train = jnp.stack([xx_train, yy_train], axis=-1)
-
-        xx_eval = jnp.linspace(-pi, pi, 50)
-        yy_eval = jnp.linspace(-pi, pi, 50)
-        xx_eval, yy_eval = jnp.meshgrid(xx_eval, yy_eval)
-        xx_eval = xx_eval.flatten()
-        yy_eval = yy_eval.flatten()
-        pts_eval = jnp.stack([xx_eval, yy_eval], axis=-1)
-        # Use vmap over the new scalar __call__ for prediction.
-        u_train = u_true(xx_train, yy_train, L).reshape(-1, 1)
-        print(f"Training data generated with shape: {u_train.shape}")
+            xx_eval = jnp.linspace(-pi, pi, 50)
+            yy_eval = jnp.linspace(-pi, pi, 50)
+            xx_eval, yy_eval = jnp.meshgrid(xx_eval, yy_eval)
+            xx_eval = xx_eval.flatten()
+            yy_eval = yy_eval.flatten()
+            pts_eval = jnp.stack([xx_eval, yy_eval], axis=-1)
+            # Use vmap over the new scalar __call__ for prediction.
             
+            u_train = jax.vmap(lambda x, y: true_model(x, y))(xx_train, yy_train).reshape(-1, 1)
+            u_train += jax.random.normal(jax.random.PRNGKey(42), shape=u_train.shape) * error * jnp.max(u_train.flatten())  # Add noise to the training data.
+            print(f"Training data generated with shape: {u_train.shape}")
+                
 
-        # loss_history_hyb_phys, loss_history_hyb_syn, param_history_hyb, u_hyb_phys, u_hyb_syn = train_hybrid(epochs)
-        # loss_history_fem, param_history_fem, u_fem = train_fem(epochs)
-        # loss_history_pinn, param_history_pinn, u_pinn = train_pinn(epochs)
-
-        
-
-
-        # # convert them to njp arrays
-        # loss_history_hyb_phys = jnp.array(loss_history_hyb_phys)
-        # loss_history_hyb_syn = jnp.array(loss_history_hyb_syn)
-        # loss_history_fem = jnp.array(loss_history_fem)
-        # loss_history_pinn = jnp.array(loss_history_pinn)
-        # param_history_hyb = jnp.array(param_history_hyb)
-        # param_history_fem = jnp.array(param_history_fem)
-        # param_history_pinn = jnp.array(param_history_pinn)
-        # u_hyb_phys = jnp.array(u_hyb_phys)
-        # u_hyb_syn = jnp.array(u_hyb_syn)
-        # u_fem = jnp.array(u_fem)
-        # u_pinn = jnp.array(u_pinn)
-
-        # with open(f"src/files/experiment_1/results_summary_{i}.txt", "w") as file:
-        #     file.write("FEM Loss min in last 100: " + str(jnp.min(loss_history_fem[-100:])) + "\n")
-        #     file.write("Hybrid Phys Loss min in last 100: " + str(jnp.min(loss_history_hyb_phys[-100:])) + "\n")
-        #     file.write("Hybrid Syn Loss min in last 100: " + str(jnp.min(loss_history_hyb_syn[-100:])) + "\n")
-        #     file.write("PINN Loss min in last 100: " + str(jnp.min(loss_history_pinn[-100:])) + "\n")
+            # loss_history_hyb_phys, loss_history_hyb_syn, param_history_hyb, u_hyb_phys, u_hyb_syn = train_hybrid(epochs, weight=weight)
+            # loss_history_fem, param_history_fem, u_fem = train_fem(epochs)
+            # loss_history_pinn, param_history_pinn, u_pinn = train_pinn(epochs)
 
 
-        loss_history_hyb_syn = np.load(f"src/files/experiment_1/hybrid_loss_syn_new_50.npy")
-        loss_history_hyb_phys = np.load(f"src/files/experiment_1/hybrid_loss_phys_new_50.npy")
-        loss_history_fem = np.load(f"src/files/experiment_1/fem_loss_new_50.npy")
-        loss_history_pinn = np.load(f"src/files/experiment_1/pinn_loss_new_50.npy")
-        param_history_hyb = np.load(f"src/files/experiment_1/hybrid_params_new_50.npy")
-        param_history_fem = np.load(f"src/files/experiment_1/fem_params_new_50.npy")
-        param_history_pinn = np.load(f"src/files/experiment_1/pinn_params_new_50.npy")
-        u_hyb_phys = np.load(f"src/files/experiment_1/u_hyb_phys_new_50.npy")
-        u_hyb_syn = np.load(f"src/files/experiment_1/u_hyb_syn_new_50.npy")
-        u_fem = np.load(f"src/files/experiment_1/u_fem_new_50.npy")
-        u_pinn = np.load(f"src/files/experiment_1/u_pinn_new_50.npy")
+            # # convert them to njp arrays
+            # loss_history_hyb_phys = jnp.array(loss_history_hyb_phys)
+            # loss_history_hyb_syn = jnp.array(loss_history_hyb_syn)
+            # loss_history_fem = jnp.array(loss_history_fem)
+            # loss_history_pinn = jnp.array(loss_history_pinn)
+            # param_history_hyb = jnp.array(param_history_hyb)
+            # param_history_fem = jnp.array(param_history_fem)
+            # param_history_pinn = jnp.array(param_history_pinn)
+            # u_hyb_phys = jnp.array(u_hyb_phys)
+            # u_hyb_syn = jnp.array(u_hyb_syn)
+            # u_fem = jnp.array(u_fem)
+            # u_pinn = jnp.array(u_pinn)
+
+            # with open(f"src/files/darcy/results_{error}.txt", "w") as file:
+            #     file.write("FEM Loss min in last 100: " + str(jnp.min(loss_history_fem[-100:])) + "\n")
+            #     file.write("Hybrid Phys Loss min in last 100: " + str(jnp.min(loss_history_hyb_phys[-100:])) + "\n")
+            #     file.write("Hybrid Syn Loss min in last 100: " + str(jnp.min(loss_history_hyb_syn[-100:])) + "\n")
+            #     file.write("PINN Loss min in last 100: " + str(jnp.min(loss_history_pinn[-100:])) + "\n")
+            #     file.write("FEM Loss final: " + str(loss_history_fem[-1]) + "\n")
+            #     file.write("Hybrid Phys Loss final: " + str(loss_history_hyb_phys[-1]) + "\n")
+            #     file.write("Hybrid Syn Loss final: " + str(loss_history_hyb_syn[-1]) + "\n")
+            #     file.write("PINN Loss final: " + str(loss_history_pinn[-1]) + "\n")
+ 
+
+            # # Save the results.
+            # jnp.save(f"src/files/darcy/hybrid_loss_phys_{error}.npy", loss_history_hyb_phys)
+            # jnp.save(f"src/files/darcy/hybrid_loss_syn_{error}.npy", loss_history_hyb_syn)
+            # jnp.save(f"src/files/darcy/hybrid_params_{error}.npy", param_history_hyb)
+            # jnp.save(f"src/files/darcy/fem_loss_{error}.npy", loss_history_fem)
+            # jnp.save(f"src/files/darcy/fem_params_{error}.npy", param_history_fem)
+            # jnp.save(f"src/files/darcy/pinn_loss_{error}.npy", loss_history_pinn)
+            # jnp.save(f"src/files/darcy/pinn_params_{error}.npy", param_history_pinn)
+            # jnp.save(f"src/files/darcy/u_hyb_phys_{error}.npy", u_hyb_phys)
+            # jnp.save(f"src/files/darcy/u_hyb_syn_{error}.npy", u_hyb_syn)
+            # jnp.save(f"src/files/darcy/u_fem_{error}.npy", u_fem)
+            # jnp.save(f"src/files/darcy/u_pinn_{error}.npy", u_pinn)
+
+            loss_history_hyb_syn = np.load(f"src/files/darcy/hybrid_loss_syn_{error}.npy")
+            loss_history_hyb_phys = np.load(f"src/files/darcy/hybrid_loss_phys_{error}.npy")
+            loss_history_fem = np.load(f"src/files/darcy/fem_loss_{error}.npy")
+            loss_history_pinn = np.load(f"src/files/darcy/pinn_loss_{error}.npy")
+            param_history_hyb = np.load(f"src/files/darcy/hybrid_params_{error}.npy")
+            param_history_fem = np.load(f"src/files/darcy/fem_params_{error}.npy")
+            param_history_pinn = np.load(f"src/files/darcy/pinn_params_{error}.npy")
+            u_hyb_phys = np.load(f"src/files/darcy/u_hyb_phys_{error}.npy")
+            u_hyb_syn = np.load(f"src/files/darcy/u_hyb_syn_{error}.npy")
+            u_fem = np.load(f"src/files/darcy/u_fem_{error}.npy")
+            u_pinn = np.load(f"src/files/darcy/u_pinn_{error}.npy")
 
 
 
-        def replace_zeros_linear(arr):
-            """
-            Replace zeros in a 1D numpy array with linear interpolation based on nonzero values.
-            """
-            indices = np.arange(len(arr))
-            mask = arr != 0
-            # If no nonzero values exist, return array as is.
-            if mask.sum() == 0:
-                return arr
-            # np.interp will extrapolate constant for points outside interpolation range.
-            return np.interp(indices, indices[mask], arr[mask])
-        def replace_zeros_nearest(arr):
-            """
-            Replace zeros in a nD numpy array with the nearest nonzero value in axis 0.
-            """
-            # Get the indices of nonzero elements.
-            nonzero_indices = np.nonzero(arr)[0]
-            # If no nonzero values exist, return array as is.
-            if len(nonzero_indices) == 0:
-                return arr
-            # Get the indices of zero elements.
-            zero_indices = np.where(arr == 0)[0]
-            # Create a copy of the array to modify.
-            arr_copy = arr.copy()
-            # Replace zeros with the nearest nonzero value.
-            for zero_index in zero_indices:
-                # Find the nearest nonzero index.
-                nearest_index = nonzero_indices[np.abs(nonzero_indices - zero_index).argmin()]
-                arr_copy[zero_index] = arr[nearest_index]
-            return arr_copy
-        
-        loss_history_hyb_phys = replace_zeros_linear(loss_history_hyb_phys)
-        loss_history_hyb_syn = replace_zeros_linear(loss_history_hyb_syn)
-        loss_history_fem = replace_zeros_linear(loss_history_fem)
-        loss_history_pinn = replace_zeros_linear(loss_history_pinn)
-        param_history_hyb = replace_zeros_nearest(param_history_hyb)
-        param_history_fem = replace_zeros_nearest(param_history_fem)
-        param_history_pinn = replace_zeros_nearest(param_history_pinn)
-        def kappa(parameters, x, y): 
-            amplitude, cx, cy = parameters[0:3]
-            return amplitude * jnp.exp(-(((x - cx)**2 + (y - cy)**2))) + 1
-        # Plot the results.
-        plot(
-        param_history_fem,
-        param_history_hyb,
-        param_history_pinn,      # New argument for PINN training results.
-        true_params,
-        loss_history_fem,
-        loss_history_hyb_phys,
-        loss_history_pinn,          # New loss history for PINN.
-        kappa,
-        eta,
-        pts_train,
-        domain=(-pi, pi),
-        N=100,
-        hyb_synth_loss_hist=loss_history_hyb_syn,
-        u_hyb_phys=u_hyb_phys,
-        u_hyb_syn=u_hyb_syn,
-        u_fem=u_fem,
-        u_pinn=u_pinn,
-        u_true=u_true(xx_eval, yy_eval, L).reshape(-1, 1),
-        filename=f"experiment_1/experiment_1_new"
-        )
+            def replace_zeros_linear(arr):
+                """
+                Replace zeros in a 1D numpy array with linear interpolation based on nonzero values.
+                """
+                indices = np.arange(len(arr))
+                mask = arr != 0
+                # If no nonzero values exist, return array as is.
+                if mask.sum() == 0:
+                    return arr
+                # np.interp will extrapolate constant for points outside interpolation range.
+                return np.interp(indices, indices[mask], arr[mask])
+            def replace_zeros_nearest(arr):
+                """
+                Replace zeros in a nD numpy array with the nearest nonzero value in axis 0.
+                """
+                # Get the indices of nonzero elements.
+                nonzero_indices = np.nonzero(arr)[0]
+                # If no nonzero values exist, return array as is.
+                if len(nonzero_indices) == 0:
+                    return arr
+                # Get the indices of zero elements.
+                zero_indices = np.where(arr == 0)[0]
+                # Create a copy of the array to modify.
+                arr_copy = arr.copy()
+                # Replace zeros with the nearest nonzero value.
+                for zero_index in zero_indices:
+                    # Find the nearest nonzero index.
+                    nearest_index = nonzero_indices[np.abs(nonzero_indices - zero_index).argmin()]
+                    arr_copy[zero_index] = arr[nearest_index]
+                return arr_copy
+            
+            loss_history_hyb_phys = replace_zeros_linear(loss_history_hyb_phys)
+            loss_history_hyb_syn = replace_zeros_linear(loss_history_hyb_syn)
+            loss_history_fem = replace_zeros_linear(loss_history_fem)
+            loss_history_pinn = replace_zeros_linear(loss_history_pinn)
+            param_history_hyb = replace_zeros_nearest(param_history_hyb)
+            param_history_fem = replace_zeros_nearest(param_history_fem)
+            param_history_pinn = replace_zeros_nearest(param_history_pinn)
+            # Plot the results.
+            plot(
+            param_history_fem,
+            param_history_hyb,
+            param_history_pinn,      # New argument for PINN training results.
+            true_params,
+            loss_history_fem,
+            loss_history_hyb_phys,
+            loss_history_pinn,          # New loss history for PINN.
+            kappa,
+            None,
+            pts_train,
+            domain=(-pi, pi),
+            N=100,
+            hyb_synth_loss_hist=loss_history_hyb_syn,
+            u_hyb_phys=u_hyb_phys,
+            u_hyb_syn=u_hyb_syn,
+            u_fem=u_fem,
+            u_pinn=u_pinn,
+            u_true=u_true,
+            filename=f"darcy/darcy_{error}"
+            )
