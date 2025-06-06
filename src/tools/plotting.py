@@ -77,9 +77,9 @@ def plot(
         # Create figure layout: 4 columns for predictions + a colorbar.
         fig = plt.figure(figsize=(12, 12))
         gs_top = fig.add_gridspec(
-            3, 5, width_ratios=[1, 1, 1, 1, 0.2],
-            left=0.10, right=0.93, top=0.93, bottom=0.45,
-            wspace=0.1, hspace=0.1
+            4, 5, width_ratios=[1, 1, 1, 1, 0.2],
+            left=0.10, right=0.93, top=0.93, bottom=0.27,
+            wspace=0.07, hspace=0.07
         )
 
         # Row 1: Kappa plots.
@@ -139,49 +139,84 @@ def plot(
             
         N = int(np.sqrt(u_hyb_phys.shape[0]))
         sol = [N, N]
+        vmin_sol = min((u_hyb_phys).min(), (u_fem).min(), (u_pinn).min())
+        vmax_sol = max((u_hyb_phys).max(), (u_fem).max(), (u_pinn).max())
         vmin_err = min((u_hyb_phys - u_true).min(), (u_fem - u_true).min(), (u_pinn - u_true).min())
         vmax_err = max((u_hyb_phys - u_true).max(), (u_fem - u_true).max(), (u_pinn - u_true).max())
         xx = jnp.linspace(domain[0], domain[1], N)
         yy = jnp.linspace(domain[0], domain[1], N)
         # Plot the solutions 
         ax8 = fig.add_subplot(gs_top[2, 0])
-        cf8 = ax8.contourf(xx, yy, u_fem.reshape(sol) - u_true.reshape(sol), levels=100,
-                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        cf8 = ax8.contourf(xx, yy, u_fem.reshape(sol), levels=100,
+                                vmin=vmin_sol, vmax=vmax_sol, cmap="viridis")
         ax8.set_xticks([])
         ax8.set_yticks([])
 
         ax9 = fig.add_subplot(gs_top[2, 1])
-        cf9 = ax9.contourf(xx, yy, u_pinn.reshape(sol) - u_true.reshape(sol), levels=100,
-                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        cf9 = ax9.contourf(xx, yy, u_pinn.reshape(sol), levels=100,
+                                vmin=vmin_sol, vmax=vmax_sol, cmap="viridis")
         ax9.set_xticks([])
         ax9.set_yticks([])
 
         ax10 = fig.add_subplot(gs_top[2, 2])
-        cf10 = ax10.contourf(xx, yy, u_hyb_phys.reshape(sol) - u_true.reshape(sol), levels=100,
-                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        cf10 = ax10.contourf(xx, yy, u_hyb_phys.reshape(sol), levels=100,
+                                vmin=vmin_sol, vmax=vmax_sol, cmap="viridis")
         ax10.set_xticks([])
         ax10.set_yticks([])
 
         ax11 = fig.add_subplot(gs_top[2, 3])
-        cf11 = ax11.contourf(xx, yy, (u_true.reshape(sol) - u_true.reshape(sol)), levels=100,
-                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        cf11 = ax11.contourf(xx, yy, (u_true.reshape(sol)), levels=100,
+                                vmin=vmin_sol, vmax=vmax_sol, cmap="viridis")
         ax11.set_xticks([])
         ax11.set_yticks([])
-        
+
+        ax12 = fig.add_subplot(gs_top[3, 0])
+        cf12 = ax12.contourf(xx, yy, u_fem.reshape(sol) - u_true.reshape(sol), levels=100,
+                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        ax12.set_xticks([])
+        ax12.set_yticks([])
+
+        ax13 = fig.add_subplot(gs_top[3, 1])
+        cf13 = ax13.contourf(xx, yy, u_pinn.reshape(sol) - u_true.reshape(sol), levels=100,
+                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        ax13.set_xticks([])
+        ax13.set_yticks([])
+
+        ax14 = fig.add_subplot(gs_top[3, 2])
+        cf14 = ax14.contourf(xx, yy, u_hyb_phys.reshape(sol) - u_true.reshape(sol), levels=100,
+                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        ax14.set_xticks([])
+        ax14.set_yticks([])
+
+        ax15 = fig.add_subplot(gs_top[3, 3])
+        cf15 = ax15.contourf(xx, yy, (u_true.reshape(sol) - u_true.reshape(sol)), levels=100,
+                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        ax15.set_xticks([])
+        ax15.set_yticks([])
+
         # Add a unified colorbar for gaussians
         ax_cb = fig.add_subplot(gs_top[:2, 4])
         norm = Normalize(vmin=vmin, vmax=vmax)
         mappable = ScalarMappable(norm=norm, cmap="viridis")
         mappable.set_array([])
         cb = fig.colorbar(mappable, cax=ax_cb)
+        cb.set_ticks([1.0, 2.0, 3.0, 4.0, 5.0])
 
         # Add a unified colorbar for solutions
         
         ax_cb = fig.add_subplot(gs_top[2:3, 4])
+        norm = Normalize(vmin=vmin_sol, vmax=vmax_sol)
+        mappable = ScalarMappable(norm=norm, cmap="viridis")
+        mappable.set_array([])
+        cb = fig.colorbar(mappable, cax=ax_cb)
+        cb.set_ticks([-1.0, 0.0, 1.0, 2.0])
+
+        ax_cb = fig.add_subplot(gs_top[3:4, 4])
         norm = Normalize(vmin=vmin_err, vmax=vmax_err)
         mappable = ScalarMappable(norm=norm, cmap="viridis")
         mappable.set_array([])
         cb = fig.colorbar(mappable, cax=ax_cb)
+        cb.set_ticks([0, 1])
 
         #  u'#1f77b4', u'#ff7f0e', u'#2ca02c', u'#d62728'
 
@@ -217,7 +252,10 @@ def plot(
             
             window = 100
             # Plot the loss history.
-            ax_loss = fig.add_axes([0.07, 0.07, 0.86, 0.3])
+            ax_loss = fig.add_axes([0.1, 0.07, 0.83, 0.191])
+            gradient = np.linspace(1, 0.6, 256)  # from white to light blue
+            gradient = np.outer(gradient, gradient)  # diagonal fade
+            
             x_hyb, avg_hyb, std_hyb = moving_avg_std(hyb_phys_loss_hist, window=window)
             ax_loss.plot(x_hyb, avg_hyb, label="HYCO Physical", color = 'red', lw = 2)
 
@@ -231,7 +269,8 @@ def plot(
             x_pinn, avg_pinn, std_pinn = moving_avg_std(pinn_loss_hist, window=window)
             ax_loss.plot(x_pinn, avg_pinn, label="PINN", color = 'blue', lw = 2)
             # ax_loss.fill_between(x_synth, avg_synth - std_synth, avg_synth + std_synth, alpha=0.3)
-
+            ax_loss.imshow(gradient, extent = [100, 3010, 0.05, 1.5], aspect='auto', cmap='Blues', origin='lower', zorder=0, alpha = 0.1)
+            ax_loss.imshow(gradient, extent = [100, 3010, 0.05, 1.5], aspect='auto', cmap='Grays', origin='lower', zorder=0, alpha = 0.05)
             # set yrange to not be too far from the average
             avg_min = min(avg_phys.min(), avg_pinn.min(), avg_hyb.min(), avg_synth.min())
             avg_max = max(avg_phys.max(), avg_pinn.max(), avg_hyb.max(), avg_synth.max())
@@ -240,19 +279,20 @@ def plot(
 
             ax_loss.set_yscale("log")
             ax_loss.set_xlabel("Epochs", fontsize=18)
-            ax_loss.set_ylabel(r"Normalized L2 Error $e_m$", fontsize=18)
-            ax_loss.legend(fontsize=12)
+            ax_loss.set_ylabel(r"$e_m$", fontsize=22, rotation=0)
+            ax_loss.legend(fontsize=12, loc='upper right')
 
             # Add column labels (above the grid).
             # The grid spans from left=0.07 to right=0.93 (width = 0.86). We split this into 4 columns.
-            col_centers = [0.07 + 0.81 * (i + 0.5) / 4 for i in range(4)]
+            col_centers = [0.1 + 0.785 * (i + 0.5) / 4 for i in range(4)]
             for label, x_pos in zip(["FEM", "PINN", "HYCO", "True"], col_centers):
                 fig.text(x_pos, 0.96, label, ha="center", va="center", fontsize=18)
 
             # Add row labels on the left (at fixed positions).
-            fig.text(0.015, 0.86, r"$\kappa$", ha="center", va="center", fontsize=22)
-            fig.text(0.015, 0.69, r"$\eta$", ha="center", va="center", fontsize=22)
-            fig.text(0.015, 0.525, r"$u - u_{true}$", ha="center", va="center", fontsize=22, rotation=90)
+            fig.text(0.047, 0.845, r"$\kappa$", ha="center", va="center", fontsize=22)
+            fig.text(0.047, 0.685, r"$\eta$", ha="center", va="center", fontsize=22)
+            fig.text(0.047, 0.515, r"$u_m$", ha="center", va="center", fontsize=22)
+            fig.text(0.047, 0.355, r"$u - u_m$", ha="center", va="center", fontsize=22)
     else:
         """
         Creates a static plot showing the final predictions for Physics, PINN, Hybrid, and True.
@@ -278,16 +318,17 @@ def plot(
         kappa_pinn = kappa_func(final_pinn, xx_flat, yy_flat)
         kappa_hyb  = kappa_func(final_hyb,  xx_flat, yy_flat)
         kappa_true = kappa_func(final_true, xx_flat, yy_flat)
+
         # Compute the global min/max from the true predictions.
         vmin = float(jnp.floor(jnp.min(jnp.array([kappa_true]))))
         vmax = float(jnp.ceil(jnp.max(jnp.array([kappa_true]))))
 
         # Create figure layout: 4 columns for predictions + a colorbar.
-        fig = plt.figure(figsize=(12, 9))
+        fig = plt.figure(figsize=(12, 10))
         gs_top = fig.add_gridspec(
-            2, 5, width_ratios=[1, 1, 1, 1, 0.2],
-            left=0.07, right=0.93, top=0.93, bottom=0.45,
-            wspace=0.1, hspace=0.1
+            3, 5, width_ratios=[1, 1, 1, 1, 0.2],
+            left=0.10, right=0.93, top=0.93, bottom=0.323,
+            wspace=0.07, hspace=0.07
         )
 
         # Row 1: Kappa plots.
@@ -315,6 +356,8 @@ def plot(
         ax3.set_xticks([])
         ax3.set_yticks([])
 
+    
+
         # Scatter training data on all subplots.
         for ax in [ax0, ax1, ax2, ax3]:
             ax.scatter(pts_train[:, 0], pts_train[:, 1], marker="o",
@@ -322,51 +365,84 @@ def plot(
             
         N = int(np.sqrt(u_hyb_phys.shape[0]))
         sol = [N, N]
-        vmin_err = min((u_hyb_phys - u_true).min(), (u_fem - u_true).min(), (u_pinn - u_true).min())
-        vmax_err = max((u_hyb_phys - u_true).max(), (u_fem - u_true).max(), (u_pinn - u_true).max())
+        vmin_sol = min((u_hyb_phys).min(), (u_pinn).min())
+        vmax_sol = max((u_hyb_phys).max(), (u_pinn).max()) + 2
+        vmin_err = min((u_hyb_phys - u_true).min(), (u_pinn - u_true).min())
+        vmax_err = max((u_hyb_phys - u_true).max(), (u_pinn - u_true).max()) + 4
         xx = jnp.linspace(domain[0], domain[1], N)
         yy = jnp.linspace(domain[0], domain[1], N)
         # Plot the solutions 
         ax8 = fig.add_subplot(gs_top[1, 0])
-        cf8 = ax8.contourf(xx, yy, u_fem.reshape(sol) - u_true.reshape(sol), levels=100,
-                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        cf8 = ax8.contourf(xx, yy, u_fem.reshape(sol), levels=200,
+                                vmin=vmin_sol, vmax=vmax_sol, cmap="viridis")
         ax8.set_xticks([])
         ax8.set_yticks([])
 
         ax9 = fig.add_subplot(gs_top[1, 1])
-        cf9 = ax9.contourf(xx, yy, u_pinn.reshape(sol) - u_true.reshape(sol), levels=100,
-                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        cf9 = ax9.contourf(xx, yy, u_pinn.reshape(sol), levels=200,
+                                vmin=vmin_sol, vmax=vmax_sol, cmap="viridis")
         ax9.set_xticks([])
         ax9.set_yticks([])
 
         ax10 = fig.add_subplot(gs_top[1, 2])
-        cf10 = ax10.contourf(xx, yy, u_hyb_phys.reshape(sol) - u_true.reshape(sol), levels=100,
-                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        cf10 = ax10.contourf(xx, yy, u_hyb_phys.reshape(sol), levels=200,
+                                vmin=vmin_sol, vmax=vmax_sol, cmap="viridis")
         ax10.set_xticks([])
         ax10.set_yticks([])
 
         ax11 = fig.add_subplot(gs_top[1, 3])
-        cf11 = ax11.contourf(xx, yy, (u_true.reshape(sol) - u_true.reshape(sol)), levels=100,
-                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        cf11 = ax11.contourf(xx, yy, (u_true.reshape(sol)), levels=200,
+                                vmin=vmin_sol, vmax=vmax_sol, cmap="viridis")
         ax11.set_xticks([])
         ax11.set_yticks([])
-        
+
+        ax12 = fig.add_subplot(gs_top[2, 0])
+        cf12 = ax12.contourf(xx, yy, u_fem.reshape(sol) - u_true.reshape(sol), levels=200,
+                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        ax12.set_xticks([])
+        ax12.set_yticks([])
+
+        ax13 = fig.add_subplot(gs_top[2, 1])
+        cf13 = ax13.contourf(xx, yy, u_pinn.reshape(sol) - u_true.reshape(sol), levels=200,
+                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        ax13.set_xticks([])
+        ax13.set_yticks([])
+
+        ax14 = fig.add_subplot(gs_top[2, 2])
+        cf14 = ax14.contourf(xx, yy, u_hyb_phys.reshape(sol) - u_true.reshape(sol), levels=100,
+                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        ax14.set_xticks([])
+        ax14.set_yticks([])
+
+        ax15 = fig.add_subplot(gs_top[2, 3])
+        cf15 = ax15.contourf(xx, yy, (u_true.reshape(sol) - u_true.reshape(sol)), levels=100,
+                                vmin=vmin_err, vmax=vmax_err, cmap="viridis")
+        ax15.set_xticks([])
+        ax15.set_yticks([])
+
         # Add a unified colorbar for gaussians
         ax_cb = fig.add_subplot(gs_top[:1, 4])
         norm = Normalize(vmin=vmin, vmax=vmax)
         mappable = ScalarMappable(norm=norm, cmap="viridis")
         mappable.set_array([])
         cb = fig.colorbar(mappable, cax=ax_cb)
-        cb.set_label("Parameter Value", fontsize=14)
+        cb.set_ticks([1.0, 2.0, 3.0, 4.0])
 
         # Add a unified colorbar for solutions
         
         ax_cb = fig.add_subplot(gs_top[1:2, 4])
+        norm = Normalize(vmin=vmin_sol, vmax=vmax_sol)
+        mappable = ScalarMappable(norm=norm, cmap="viridis")
+        mappable.set_array([])
+        cb = fig.colorbar(mappable, cax=ax_cb)
+        cb.set_ticks([0.0, 1.0, 2.0, 3.0, 4.0, 5, 6])
+
+        ax_cb = fig.add_subplot(gs_top[2:3, 4])
         norm = Normalize(vmin=vmin_err, vmax=vmax_err)
         mappable = ScalarMappable(norm=norm, cmap="viridis")
         mappable.set_array([])
         cb = fig.colorbar(mappable, cax=ax_cb)
-        cb.set_label("Solution Value", fontsize=14)
+        cb.set_ticks([0, 1, 2, 3, 4, 5])
 
         #  u'#1f77b4', u'#ff7f0e', u'#2ca02c', u'#d62728'
 
@@ -377,10 +453,9 @@ def plot(
             mappable = ScalarMappable(norm=norm, cmap="viridis")
             mappable.set_array([])
             cb = fig.colorbar(mappable, cax=ax_cb)
-            cb.set_label("Parameter Value", fontsize=14)
 
             # Plot the loss history.
-            ax_loss = fig.add_axes([0.07, 0.07, 0.86, 0.3])
+            ax_loss = fig.add_axes([0.07, 0.07, 0.86, 0.29])
             ax_loss.plot(phys_loss_hist, label="FEM")
             ax_loss.plot(pinn_loss_hist, label="PINN", linestyle=":")
             ax_loss.plot(hyb_phys_loss_hist, label="HYCO", linestyle="--")
@@ -403,29 +478,25 @@ def plot(
             
             window = 100
             # Plot the loss history.
-            ax_loss = fig.add_axes([0.07, 0.07, 0.86, 0.3])
-            # Plot the loss history with moving average and shading.
-
+            ax_loss = fig.add_axes([0.1, 0.07, 0.83, 0.24])
+            gradient = np.linspace(1, 0.6, 256)  # from white to light blue
+            gradient = np.outer(gradient, gradient)  # diagonal fade
+            
             x_hyb, avg_hyb, std_hyb = moving_avg_std(hyb_phys_loss_hist, window=window)
-            ax_loss.plot(x_hyb, avg_hyb, label="HYCO Physical Error", color = 'red', lw = 2)
+            ax_loss.plot(x_hyb, avg_hyb, label="HYCO Physical", color = 'red', lw = 2)
 
             x_synth, avg_synth, std_synth = moving_avg_std(hyb_synth_loss_hist, window=window)
-            ax_loss.plot(x_synth, avg_synth, label="HYCO Synthetic Error", color = 'green', lw = 2)
+            ax_loss.plot(x_synth, avg_synth, label="HYCO Synthetic", color = 'green', lw = 2)
 
             x_phys, avg_phys, std_phys = moving_avg_std(phys_loss_hist, window=window)
-            ax_loss.plot(x_phys, avg_phys, label="FEM Error", color = 'black', lw = 2)
+            ax_loss.plot(x_phys, avg_phys, label="FEM", color = 'black', lw = 2)
             # ax_loss.fill_between(x_phys, avg_phys - std_phys, avg_phys + std_phys, alpha=0.3)
 
             x_pinn, avg_pinn, std_pinn = moving_avg_std(pinn_loss_hist, window=window)
-            ax_loss.plot(x_pinn, avg_pinn, label="PINN Error", color = 'blue', lw = 2)
-            # ax_loss.fill_between(x_pinn, avg_pinn - std_pinn, avg_pinn + std_pinn, alpha=0.3)
-
-            
-            # ax_loss.fill_between(x_hyb, avg_hyb - std_hyb, avg_hyb + std_hyb, alpha=0.3)
-
-            
+            ax_loss.plot(x_pinn, avg_pinn, label="PINN", color = 'blue', lw = 2)
             # ax_loss.fill_between(x_synth, avg_synth - std_synth, avg_synth + std_synth, alpha=0.3)
-
+            ax_loss.imshow(gradient, extent = [100, 3010, 0.05, 1.5], aspect='auto', cmap='Blues', origin='lower', zorder=0, alpha = 0.1)
+            ax_loss.imshow(gradient, extent = [100, 3010, 0.05, 1.5], aspect='auto', cmap='Grays', origin='lower', zorder=0, alpha = 0.05)
             # set yrange to not be too far from the average
             avg_min = min(avg_phys.min(), avg_pinn.min(), avg_hyb.min(), avg_synth.min())
             avg_max = max(avg_phys.max(), avg_pinn.max(), avg_hyb.max(), avg_synth.max())
@@ -433,20 +504,20 @@ def plot(
         
 
             ax_loss.set_yscale("log")
-            ax_loss.set_title("Mean Squared Error History", fontsize=16)
-            ax_loss.set_xlabel("Epoch", fontsize=16)
-            ax_loss.set_ylabel("Mean Squared Error", fontsize=16)
-            ax_loss.legend(fontsize=12)
+            ax_loss.set_xlabel("Epochs", fontsize=18)
+            ax_loss.set_ylabel(r"$e_m$", fontsize=22, rotation=0)
+            ax_loss.legend(fontsize=12, loc='upper right')
 
             # Add column labels (above the grid).
             # The grid spans from left=0.07 to right=0.93 (width = 0.86). We split this into 4 columns.
-            col_centers = [0.07 + 0.81 * (i + 0.5) / 4 for i in range(4)]
+            col_centers = [0.1 + 0.785 * (i + 0.5) / 4 for i in range(4)]
             for label, x_pos in zip(["FEM", "PINN", "HYCO", "True"], col_centers):
                 fig.text(x_pos, 0.96, label, ha="center", va="center", fontsize=18)
 
             # Add row labels on the left (at fixed positions).
-            fig.text(0.04, 0.82, r"$\kappa$", ha="center", va="center", fontsize=22)
-            fig.text(0.04, 0.59, r"$u - u_{true}$", ha="center", va="center", fontsize=22, rotation=90)
+            fig.text(0.047, 0.845, r"$\kappa$", ha="center", va="center", fontsize=22)
+            fig.text(0.047, 0.63, r"$u_m$", ha="center", va="center", fontsize=22)
+            fig.text(0.047, 0.42, r"$u - u_m$", ha="center", va="center", fontsize=22)
 
 
         
